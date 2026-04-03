@@ -32,6 +32,15 @@
 .PARAMETER ReportPath
     Directory where reports are saved. Defaults to the script directory.
 
+.PARAMETER StartAt
+    Exact future date and time to begin the run. Use this when you want a
+    one-off scheduled start such as 2026-04-03 23:30.
+
+.PARAMETER StartAtTime
+    Daily time-of-day to begin the run in the local time zone, using the next
+    occurrence of that time. Example: 23:30 starts tonight if still in the
+    future, otherwise tomorrow night.
+
 .PARAMETER ValidateLoad
     Generate synthetic file/process workload during the recording period to
     produce meaningful scan data for testing or baseline analysis. For real
@@ -59,6 +68,7 @@
     .\defender.ps1 -RecordingSeconds 300 -TopN 30
     .\defender.ps1 -ValidateLoad -ValidateExclusions -VerboseCAB
     .\defender.ps1 -RecordingSeconds 120 -ReportPath "C:\Reports"
+    .\defender.ps1 -StartAtTime "23:30" -RecordingSeconds 300 -ReportPath "C:\Reports"
     .\defender.ps1 -RecordingSeconds 120 -AIMode
 #>
 [CmdletBinding()]
@@ -70,6 +80,10 @@ param(
     [int]$TopN = 25,
 
     [string]$ReportPath,
+
+    [datetime]$StartAt,
+
+    [string]$StartAtTime,
 
     [switch]$ValidateLoad,
 
@@ -163,6 +177,94 @@ function Format-Duration([double]$ms) {
 function HtmlEncode([string]$s) {
     if (-not $s) { return '' }
     return [System.Net.WebUtility]::HtmlEncode($s)
+}
+
+function Resolve-ScheduledStart {
+    param(
+        [datetime]$ExplicitStart,
+        [string]$TimeOfDay,
+        [bool]$ExplicitStartSpecified,
+        [bool]$TimeOfDaySpecified
+    )
+
+    if ($ExplicitStartSpecified -and $TimeOfDaySpecified) {
+        throw "Use either -StartAt or -StartAtTime, not both."
+    }
+
+    if ($TimeOfDaySpecified) {
+        $parsedTime = [TimeSpan]::Zero
+        if (-not [TimeSpan]::TryParse($TimeOfDay, [ref]$parsedTime)) {
+            throw "StartAtTime must be a valid local time such as 23:30 or 23:30:00."
+        }
+
+        $now = Get-Date
+        $candidate = [datetime]::Today.Add($parsedTime)
+        if ($candidate -le $now.AddSeconds(5)) {
+            $candidate = $candidate.AddDays(1)
+        }
+
+        return [PSCustomObject]@{
+            StartAt   = $candidate
+            Mode      = 'TimeOfDay'
+            InputText = $TimeOfDay
+        }
+    }
+
+    if ($ExplicitStartSpecified) {
+        if ($ExplicitStart -le (Get-Date).AddSeconds(5)) {
+            throw "StartAt must be in the future. Use -StartAtTime for the next daily occurrence."
+        }
+
+        return [PSCustomObject]@{
+            StartAt   = $ExplicitStart
+            Mode      = 'DateTime'
+            InputText = $ExplicitStart.ToString('yyyy-MM-dd HH:mm:ss')
+        }
+    }
+
+    return $null
+}
+
+function Wait-UntilScheduledStart {
+    param(
+        [Parameter(Mandatory)][datetime]$StartAt,
+        [string]$Mode = 'DateTime',
+        [string]$InputText
+    )
+
+    $waitStartedAt = Get-Date
+    $remaining = $StartAt - $waitStartedAt
+    if ($remaining.TotalSeconds -le 0) {
+        return 0
+    }
+
+    $waitDescription = if ($remaining.TotalMinutes -ge 1) {
+        "{0} minute(s)" -f [math]::Ceiling($remaining.TotalMinutes)
+    }
+    else {
+        "{0} second(s)" -f [math]::Ceiling($remaining.TotalSeconds)
+    }
+
+    Write-Section "0 - Scheduled Start"
+    Write-Info "Schedule mode   : $Mode"
+    if ($InputText) {
+        Write-Info "Requested input : $InputText"
+    }
+    Write-Info "Scheduled start : $($StartAt.ToString('yyyy-MM-dd HH:mm:ss'))"
+    Write-Info "Current time    : $($waitStartedAt.ToString('yyyy-MM-dd HH:mm:ss'))"
+    Write-Info "Waiting         : $waitDescription"
+
+    while ($true) {
+        $remaining = $StartAt - (Get-Date)
+        if ($remaining.TotalSeconds -le 0) {
+            break
+        }
+
+        $sleepSeconds = [int][math]::Min([math]::Ceiling($remaining.TotalSeconds), 60)
+        Start-Sleep -Seconds $sleepSeconds
+    }
+
+    return [math]::Round(((Get-Date) - $waitStartedAt).TotalSeconds, 1)
 }
 
 function Truncate([string]$s, [int]$maxLen = 55) {
@@ -621,6 +723,28 @@ function Get-ImpactColour([string]$impact) {
     switch ($impact) { 'HIGH' { 'Red' } 'MEDIUM' { 'Yellow' } default { 'Green' } }
 }
 
+$startAtSpecified = $PSBoundParameters.ContainsKey('StartAt')
+$startAtTimeSpecified = $PSBoundParameters.ContainsKey('StartAtTime')
+$script:scheduleMode = 'Immediate'
+$script:scheduleInput = $null
+$script:scheduledStartAt = $null
+$script:scheduledWaitSeconds = 0
+$script:actualRunStartedAt = $null
+
+try {
+    $scheduleRequest = Resolve-ScheduledStart -ExplicitStart $StartAt -TimeOfDay $StartAtTime -ExplicitStartSpecified $startAtSpecified -TimeOfDaySpecified $startAtTimeSpecified
+    if ($scheduleRequest) {
+        $script:scheduleMode = $scheduleRequest.Mode
+        $script:scheduleInput = $scheduleRequest.InputText
+        $script:scheduledStartAt = $scheduleRequest.StartAt
+    }
+}
+catch {
+    Write-Section "0 - Scheduled Start"
+    Write-Bad $_.Exception.Message
+    Exit-Script 1
+}
+
 try {
     Start-Transcript -Path $script:transcriptFile -Force | Out-Null
     $script:transcriptStarted = $true
@@ -629,6 +753,12 @@ try {
 catch {
     Write-Warn "Could not start transcript logging: $($_.Exception.Message)"
 }
+
+if ($script:scheduledStartAt) {
+    $script:scheduledWaitSeconds = Wait-UntilScheduledStart -StartAt $script:scheduledStartAt -Mode $script:scheduleMode -InputText $script:scheduleInput
+}
+
+$script:actualRunStartedAt = Get-Date
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  STEP 1 — PRE-FLIGHT CHECKS
@@ -1929,6 +2059,11 @@ $jsonData = [ordered]@{
         AIMode             = [bool]$AIMode
         AIExportFile       = $aiExportFile
         AIPromptFile       = $aiPromptFile
+        ScheduleMode       = $script:scheduleMode
+        ScheduleInput      = $script:scheduleInput
+        ScheduledStartAt   = if ($script:scheduledStartAt) { $script:scheduledStartAt.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
+        ActualRunStartedAt = if ($script:actualRunStartedAt) { $script:actualRunStartedAt.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
+        ScheduledWaitSeconds = $script:scheduledWaitSeconds
         ContextualExclusionsSupported = $contextualExclusionsSupported
         DisableLocalAdminMerge = $disableLocalAdminMerge
     }
@@ -3161,6 +3296,7 @@ $html = @"
   <strong>Engine:</strong> $(if($status){$status.AMProductVersion}else{'N/A'}) |
   <strong>Signatures:</strong> $(if($status){$status.AntivirusSignatureVersion}else{'N/A'}) |
   <strong>Real-time:</strong> $(if($status -and $status.RealTimeProtectionEnabled){'Enabled'}else{'DISABLED'})
+  $(if($script:scheduledStartAt){"<br><strong>Scheduled start:</strong> $(HtmlEncode $script:scheduledStartAt.ToString('yyyy-MM-dd HH:mm:ss')) | <strong>Actual start:</strong> $(HtmlEncode $script:actualRunStartedAt.ToString('yyyy-MM-dd HH:mm:ss')) | <strong>Waited:</strong> $(HtmlEncode ([string]("{0:N1} min" -f ($script:scheduledWaitSeconds / 60))))"}else{''})
 </div>
 
 <div class="summary-grid">

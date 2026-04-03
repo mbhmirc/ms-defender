@@ -24,6 +24,10 @@ param(
 
     [string]$OutputRoot,
 
+    [datetime]$StartAt,
+
+    [string]$StartAtTime,
+
     [switch]$StopOnFailure
 )
 
@@ -37,6 +41,17 @@ $testHarness = Join-Path $scriptDir 'defender-test.ps1'
 if (-not $OutputRoot) {
     $OutputRoot = Join-Path $scriptDir ("validation_loop_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
 }
+
+$startAtSpecified = $PSBoundParameters.ContainsKey('StartAt')
+$startAtTimeSpecified = $PSBoundParameters.ContainsKey('StartAtTime')
+try {
+    $scheduleRequest = Resolve-ScheduledStart -ExplicitStart $StartAt -TimeOfDay $StartAtTime -ExplicitStartSpecified $startAtSpecified -TimeOfDaySpecified $startAtTimeSpecified
+}
+catch {
+    Write-Stage -Stage 'SCHEDULE' -Message $_.Exception.Message -Color Red
+    exit 1
+}
+$scheduledWaitSeconds = 0
 
 function Write-Stage {
     param(
@@ -55,6 +70,90 @@ function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Resolve-ScheduledStart {
+    param(
+        [datetime]$ExplicitStart,
+        [string]$TimeOfDay,
+        [bool]$ExplicitStartSpecified,
+        [bool]$TimeOfDaySpecified
+    )
+
+    if ($ExplicitStartSpecified -and $TimeOfDaySpecified) {
+        throw "Use either -StartAt or -StartAtTime, not both."
+    }
+
+    if ($TimeOfDaySpecified) {
+        $parsedTime = [TimeSpan]::Zero
+        if (-not [TimeSpan]::TryParse($TimeOfDay, [ref]$parsedTime)) {
+            throw "StartAtTime must be a valid local time such as 23:30 or 23:30:00."
+        }
+
+        $candidate = [datetime]::Today.Add($parsedTime)
+        if ($candidate -le (Get-Date).AddSeconds(5)) {
+            $candidate = $candidate.AddDays(1)
+        }
+
+        return [PSCustomObject]@{
+            StartAt   = $candidate
+            Mode      = 'TimeOfDay'
+            InputText = $TimeOfDay
+        }
+    }
+
+    if ($ExplicitStartSpecified) {
+        if ($ExplicitStart -le (Get-Date).AddSeconds(5)) {
+            throw "StartAt must be in the future. Use -StartAtTime for the next daily occurrence."
+        }
+
+        return [PSCustomObject]@{
+            StartAt   = $ExplicitStart
+            Mode      = 'DateTime'
+            InputText = $ExplicitStart.ToString('yyyy-MM-dd HH:mm:ss')
+        }
+    }
+
+    return $null
+}
+
+function Wait-UntilScheduledStart {
+    param(
+        [Parameter(Mandatory)][datetime]$StartAt,
+        [string]$Mode = 'DateTime',
+        [string]$InputText
+    )
+
+    $waitStartedAt = Get-Date
+    $remaining = $StartAt - $waitStartedAt
+    if ($remaining.TotalSeconds -le 0) {
+        return 0
+    }
+
+    $waitDescription = if ($remaining.TotalMinutes -ge 1) {
+        "{0} minute(s)" -f [math]::Ceiling($remaining.TotalMinutes)
+    }
+    else {
+        "{0} second(s)" -f [math]::Ceiling($remaining.TotalSeconds)
+    }
+
+    Write-Stage -Stage 'SCHEDULE' -Message ("Mode: {0}" -f $Mode) -Color Yellow
+    if ($InputText) {
+        Write-Stage -Stage 'SCHEDULE' -Message ("Requested input: {0}" -f $InputText) -Color Yellow
+    }
+    Write-Stage -Stage 'SCHEDULE' -Message ("Waiting until {0} ({1})" -f $StartAt.ToString('yyyy-MM-dd HH:mm:ss'), $waitDescription) -Color Yellow
+
+    while ($true) {
+        $remaining = $StartAt - (Get-Date)
+        if ($remaining.TotalSeconds -le 0) {
+            break
+        }
+
+        $sleepSeconds = [int][math]::Min([math]::Ceiling($remaining.TotalSeconds), 60)
+        Start-Sleep -Seconds $sleepSeconds
+    }
+
+    return [math]::Round(((Get-Date) - $waitStartedAt).TotalSeconds, 1)
 }
 
 function Get-LatestFilePath {
@@ -112,6 +211,12 @@ if (-not (Test-IsAdministrator)) {
         ('"{0}"' -f $OutputRoot)
     )
 
+    if ($scheduleRequest) {
+        Write-Stage -Stage 'SCHEDULE' -Message ("Scheduled first cycle resolved to {0}" -f $scheduleRequest.StartAt.ToString('yyyy-MM-dd HH:mm:ss'))
+        $argList += '-StartAt'
+        $argList += ('"{0}"' -f $scheduleRequest.StartAt.ToString('o'))
+    }
+
     if ($StopOnFailure) {
         $argList += '-StopOnFailure'
     }
@@ -134,6 +239,10 @@ $settings = [ordered]@{
     RecordingSeconds = $RecordingSeconds
     TopN             = $TopN
     WaitMinutes      = $WaitMinutes
+    ScheduleMode     = if ($scheduleRequest) { $scheduleRequest.Mode } else { 'Immediate' }
+    ScheduleInput    = if ($scheduleRequest) { $scheduleRequest.InputText } else { $null }
+    ScheduledStartAt = if ($scheduleRequest) { $scheduleRequest.StartAt.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
+    ScheduledWaitSeconds = $scheduledWaitSeconds
     OutputRoot       = $OutputRoot
     StopOnFailure    = [bool]$StopOnFailure
 }
@@ -142,6 +251,11 @@ $history = [System.Collections.Generic.List[object]]::new()
 
 Write-Stage -Stage 'START' -Message "Output root: $OutputRoot"
 Write-Stage -Stage 'START' -Message "Running $Iterations cycle(s) with a $WaitMinutes minute pause between runs."
+
+if ($scheduleRequest) {
+    $scheduledWaitSeconds = Wait-UntilScheduledStart -StartAt $scheduleRequest.StartAt -Mode $scheduleRequest.Mode -InputText $scheduleRequest.InputText
+    $settings['ScheduledWaitSeconds'] = $scheduledWaitSeconds
+}
 
 for ($iteration = 1; $iteration -le $Iterations; $iteration++) {
     $cycleStartedAt = Get-Date

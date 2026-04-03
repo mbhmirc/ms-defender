@@ -17,6 +17,10 @@ param(
 
     [string]$OutputRoot,
 
+    [datetime]$StartAt,
+
+    [string]$StartAtTime,
+
     [switch]$ValidateLoad,
 
     [switch]$ValidateExclusions,
@@ -52,6 +56,51 @@ function Test-IsAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Resolve-ScheduledStart {
+    param(
+        [datetime]$ExplicitStart,
+        [string]$TimeOfDay,
+        [bool]$ExplicitStartSpecified,
+        [bool]$TimeOfDaySpecified
+    )
+
+    if ($ExplicitStartSpecified -and $TimeOfDaySpecified) {
+        throw "Use either -StartAt or -StartAtTime, not both."
+    }
+
+    if ($TimeOfDaySpecified) {
+        $parsedTime = [TimeSpan]::Zero
+        if (-not [TimeSpan]::TryParse($TimeOfDay, [ref]$parsedTime)) {
+            throw "StartAtTime must be a valid local time such as 23:30 or 23:30:00."
+        }
+
+        $candidate = [datetime]::Today.Add($parsedTime)
+        if ($candidate -le (Get-Date).AddSeconds(5)) {
+            $candidate = $candidate.AddDays(1)
+        }
+
+        return [PSCustomObject]@{
+            StartAt   = $candidate
+            Mode      = 'TimeOfDay'
+            InputText = $TimeOfDay
+        }
+    }
+
+    if ($ExplicitStartSpecified) {
+        if ($ExplicitStart -le (Get-Date).AddSeconds(5)) {
+            throw "StartAt must be in the future. Use -StartAtTime for the next daily occurrence."
+        }
+
+        return [PSCustomObject]@{
+            StartAt   = $ExplicitStart
+            Mode      = 'DateTime'
+            InputText = $ExplicitStart.ToString('yyyy-MM-dd HH:mm:ss')
+        }
+    }
+
+    return $null
+}
+
 function Get-LatestFilePath {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -74,6 +123,16 @@ if (-not $OutputRoot) {
     $OutputRoot = Join-Path $scriptDir ("single_run_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
 }
 
+$startAtSpecified = $PSBoundParameters.ContainsKey('StartAt')
+$startAtTimeSpecified = $PSBoundParameters.ContainsKey('StartAtTime')
+try {
+    $scheduleRequest = Resolve-ScheduledStart -ExplicitStart $StartAt -TimeOfDay $StartAtTime -ExplicitStartSpecified $startAtSpecified -TimeOfDaySpecified $startAtTimeSpecified
+}
+catch {
+    Write-Stage -Stage 'SCHEDULE' -Message $_.Exception.Message -Color Red
+    exit 1
+}
+
 if (-not (Test-IsAdministrator)) {
     Write-Stage -Stage 'ELEVATE' -Message 'Requesting administrator approval via UAC...'
 
@@ -90,6 +149,12 @@ if (-not (Test-IsAdministrator)) {
         '-OutputRoot'
         ('"{0}"' -f $OutputRoot)
     )
+
+    if ($scheduleRequest) {
+        Write-Stage -Stage 'SCHEDULE' -Message ("Scheduled start resolved to {0}" -f $scheduleRequest.StartAt.ToString('yyyy-MM-dd HH:mm:ss'))
+        $argList += '-StartAt'
+        $argList += ('"{0}"' -f $scheduleRequest.StartAt.ToString('o'))
+    }
 
     if ($ValidateLoad) {
         $argList += '-ValidateLoad'
@@ -126,6 +191,9 @@ $summaryFile = Join-Path $OutputRoot 'run_summary.json'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 Write-Stage -Stage 'START' -Message "Output root: $OutputRoot"
+if ($scheduleRequest) {
+    Write-Stage -Stage 'SCHEDULE' -Message ("Passing scheduled start {0} into defender.ps1" -f $scheduleRequest.StartAt.ToString('yyyy-MM-dd HH:mm:ss'))
+}
 Write-Stage -Stage 'RUN' -Message "Launching defender.ps1 for ${RecordingSeconds}s"
 
 $scriptError = $null
@@ -136,6 +204,10 @@ try {
         RecordingSeconds = $RecordingSeconds
         TopN             = $TopN
         ReportPath       = $OutputRoot
+    }
+
+    if ($scheduleRequest) {
+        $defenderParams['StartAt'] = $scheduleRequest.StartAt
     }
 
     if ($ValidateLoad) {
@@ -166,6 +238,9 @@ $result = [ordered]@{
     GeneratedAt         = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
     OutputRoot          = $OutputRoot
     RecordingSeconds    = $RecordingSeconds
+    ScheduleMode        = if ($scheduleRequest) { $scheduleRequest.Mode } else { 'Immediate' }
+    ScheduleInput       = if ($scheduleRequest) { $scheduleRequest.InputText } else { $null }
+    ScheduledStartAt    = if ($scheduleRequest) { $scheduleRequest.StartAt.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
     ValidateLoad        = [bool]$ValidateLoad
     ValidateExclusions  = [bool]$ValidateExclusions
     AIMode              = [bool]$AIMode

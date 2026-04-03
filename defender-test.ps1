@@ -10,6 +10,8 @@ param(
     [int]$RecordingSeconds = 20,
     [int]$TopN = 15,
     [string]$OutputRoot,
+    [datetime]$StartAt,
+    [string]$StartAtTime,
     [switch]$AIMode,
     [switch]$NoAutoClose,
     [switch]$NoOpenReport
@@ -65,6 +67,9 @@ Write-Host ""
 
 Write-Phase "RUN" "Executing defender.ps1 with -ValidateLoad -ValidateExclusions$(if($AIMode){' -AIMode'}else{''})..."
 Write-Phase "RUN" "Estimated time: ~$([math]::Ceiling($RecordingSeconds * 2.5))s (recording + analysis + CAB)"
+if ($PSBoundParameters.ContainsKey('StartAt') -or $PSBoundParameters.ContainsKey('StartAtTime')) {
+    Write-Phase "RUN" ("Scheduled start requested: {0}" -f $(if ($PSBoundParameters.ContainsKey('StartAt')) { $StartAt.ToString('yyyy-MM-dd HH:mm:ss') } else { $StartAtTime }))
+}
 Write-Host ""
 
 $scriptError = $null
@@ -76,6 +81,12 @@ try {
         ValidateLoad       = $true
         ValidateExclusions = $true
         NoOpenReport       = $NoOpenReport
+    }
+    if ($PSBoundParameters.ContainsKey('StartAt')) {
+        $defenderParams['StartAt'] = $StartAt
+    }
+    if ($PSBoundParameters.ContainsKey('StartAtTime')) {
+        $defenderParams['StartAtTime'] = $StartAtTime
     }
     if ($AIMode) {
         $defenderParams['AIMode'] = $true
@@ -609,6 +620,8 @@ $resultData = [ordered]@{
     RunId        = $runId
     Timestamp    = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     ElapsedSec   = [math]::Round($totalElapsed.TotalSeconds, 1)
+    ScheduleMode = if ($PSBoundParameters.ContainsKey('StartAt')) { 'DateTime' } elseif ($PSBoundParameters.ContainsKey('StartAtTime')) { 'TimeOfDay' } else { 'Immediate' }
+    ScheduleInput = if ($PSBoundParameters.ContainsKey('StartAt')) { $StartAt.ToString('yyyy-MM-dd HH:mm:ss') } elseif ($PSBoundParameters.ContainsKey('StartAtTime')) { $StartAtTime } else { $null }
     TotalTests   = $tests.Count
     Passed       = $pass
     Warned       = $warn
