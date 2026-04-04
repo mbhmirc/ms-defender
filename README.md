@@ -46,7 +46,27 @@ For the highest-value results, run the tool while the real issue is happening:
 - during the actual server-side performance complaint, not only after the fact
 - before adding exclusions, so you capture evidence first
 
-Use `-ValidateLoad` when you are testing the tool itself, validating the reporting pipeline, or building confidence in a lab. For production troubleshooting, real workload evidence is preferred.
+Use `-ValidateLoad` when you are testing the tool itself, validating the reporting pipeline, or building confidence in a lab. For production troubleshooting, real workload evidence is preferred. When validating synthetic attribution, you can choose `-SyntheticWorkloadMode Mixed`, `PowerShell`, or `NativeExe`.
+
+If your goal is to prove contextual recommendations end to end, prefer `-SyntheticWorkloadMode NativeExe`. That mode drives the synthetic file churn from the bundled helper executable instead of `powershell.exe`, which makes it much easier to validate contextual file-pattern recommendations without a Windows scripting host dominating the attribution.
+
+Recommendation ladder:
+
+1. Tier 1: contextual file-pattern recommendation
+2. Tier 2: contextual folder recommendation
+3. Tier 3: file-pattern path recommendation
+4. Tier 4: exact process fallback recommendation
+5. Broad folder exclusions stay manual and exceptional
+6. Tier 6: global extension fallback only if truly necessary
+
+The report now shows the preferred recommendation first and then lists fallbacks in order, so a process exclusion is treated as a later fallback instead of the default first answer.
+
+The recommendation output also shows:
+
+- `Share`: how much of the observed activity for that category happened in this run
+- `Focus`: how concentrated the activity was in the dominant folder for that extension
+
+Absolute duration is still used as the safety floor, so a tiny quiet-run spike does not get promoted just because its percentage is high.
 
 ## Repository Contents
 
@@ -55,7 +75,11 @@ Use `-ValidateLoad` when you are testing the tool itself, validating the reporti
 - [defender-test.ps1](./defender-test.ps1): automated validation harness for the main script
 - [defender-single-run.ps1](./defender-single-run.ps1): self-elevating one-shot runner that captures logs and a run summary
 - [defender-validation-loop.ps1](./defender-validation-loop.ps1): self-elevating repeat-run loop harness
+- [defender-compare.ps1](./defender-compare.ps1): compare mode for diffing two saved report JSON files
+- [defender-offline-fixture-tests.ps1](./defender-offline-fixture-tests.ps1): offline fixture suite for CAB parsing, recommendation ranking, and compare-mode checks
+- [MSDefender](./MSDefender): PowerShell module manifest and reusable command entrypoints
 - [extract_cab.ps1](./extract_cab.ps1): standalone `MpSupportFiles.cab` extraction and inventory helper
+- [tests/fixtures](./tests/fixtures): deterministic offline samples used by the fixture suite
 
 ## Requirements
 
@@ -63,6 +87,28 @@ Use `-ValidateLoad` when you are testing the tool itself, validating the reporti
 - Administrator rights for the main analysis flow
 - Microsoft Defender Antivirus cmdlets and support tooling available on the machine
 - PowerShell 5.1 or later
+
+## PowerShell Module
+
+The repository also ships a reusable PowerShell module in [MSDefender](./MSDefender).
+
+Import it from the repo root:
+
+```powershell
+Import-Module .\MSDefender\MSDefender.psd1
+Get-Command -Module MSDefender
+```
+
+Example module usage:
+
+```powershell
+Invoke-MsDefenderPerformanceAudit -RecordingSeconds 300 -TopN 30
+Invoke-MsDefenderSingleRun -RecordingSeconds 180 -ValidateLoad -SyntheticWorkloadMode NativeExe
+Compare-MsDefenderPerformanceReport -BaselineReport .\before.json -CurrentReport .\after.json
+Test-MsDefenderOfflineFixtures
+```
+
+The script entrypoints remain supported and are still the easiest choice for UAC-driven interactive runs. The module is useful when you want reusable commands for your own automation, scheduled tasks, or test pipelines.
 
 ## Main Usage
 
@@ -93,8 +139,8 @@ Scheduled overnight example:
 Validation workflow:
 
 ```powershell
-# Use this when validating the tool or testing the reporting path.
-.\defender.ps1 -RecordingSeconds 180 -ValidateLoad -ValidateExclusions -NoOpenReport
+# Use this when validating the tool and proving contextual recommendation handling.
+.\defender.ps1 -RecordingSeconds 180 -ValidateLoad -ValidateExclusions -SyntheticWorkloadMode NativeExe -TopN 100
 ```
 
 Useful examples:
@@ -102,11 +148,16 @@ Useful examples:
 ```powershell
 .\defender.ps1 -RecordingSeconds 300 -TopN 30
 .\defender.ps1 -ValidateLoad -ValidateExclusions -VerboseCAB
+.\defender.ps1 -ValidateLoad -ValidateExclusions -SyntheticWorkloadMode PowerShell -TopN 100 -NoOpenReport
+.\defender.ps1 -ValidateLoad -ValidateExclusions -SyntheticWorkloadMode NativeExe -TopN 100
 .\defender.ps1 -RecordingSeconds 120 -ReportPath "C:\Reports"
 .\defender.ps1 -StartAt "2026-04-03 23:30" -RecordingSeconds 300 -ReportPath "C:\Reports"
 .\defender.ps1 -StartAtTime "23:30" -RecordingSeconds 300 -ReportPath "C:\Reports"
+.\defender.ps1 -StrictCAB -RecordingSeconds 300 -ReportPath "C:\Reports"
 .\defender.ps1 -RecordingSeconds 120 -AIMode
 .\defender.ps1 -RecordingSeconds 180 -ValidateLoad -ValidateExclusions -NoOpenReport
+.\defender-compare.ps1 -BaselineReport C:\Reports\RunA.json -CurrentReport C:\Reports\RunB.json -OutputPath C:\Reports\Compare
+.\defender-offline-fixture-tests.ps1
 ```
 
 Scheduling notes:
@@ -149,7 +200,9 @@ Typical console flow:
 | `-ReportPath` | `string` | script directory | Directory where JSON, HTML, transcript, and related outputs are written. |
 | `-StartAt` | `datetime` | immediate | Exact future local date and time for a one-off scheduled start. |
 | `-StartAtTime` | `string` | immediate | Daily local time-of-day for the next occurrence, such as `23:30`. |
+| `-StrictCAB` | `switch` | off | Forces the run to bind itself to one fresh `MpSupportFiles.cab` snapshot and stop if only stale CAB data is available. |
 | `-ValidateLoad` | `switch` | off | Runs the synthetic workload during the recording so the tool has meaningful test data. |
+| `-SyntheticWorkloadMode` | `string` | `Mixed` | Selects the synthetic workload type used with `-ValidateLoad`: `Mixed`, `PowerShell`, or `NativeExe`. Prefer `NativeExe` when you want to validate contextual recommendation logic. |
 | `-ValidateExclusions` | `switch` | off | Creates a temporary exclusion, checks discovery methods, and verifies cleanup. |
 | `-VerboseCAB` | `switch` | off | Includes fuller `MpSupportFiles.cab` diagnostic extraction and display. |
 | `-NoOpenReport` | `switch` | off | Prevents the generated HTML report from opening automatically. |
@@ -178,10 +231,14 @@ Example JSON fields:
   "ExclusionSuggestions": [],
   "SuppressedCandidates": [
     {
-      "Type": "ValidationOnlyPattern",
-      "Value": ".cache @ synthetic workload folders",
+      "Type": "ValidationOnlyContextualPattern",
+      "Value": ".json @ synthetic workload folders",
       "Commands": [
-        "Add-MpPreference -ExclusionPath 'C:\\Users\\User\\AppData\\Local\\Temp\\DefenderWorkload_...\\logs\\*.cache'"
+        "Add-MpPreference -ExclusionPath 'C:\\Users\\User\\AppData\\Local\\Temp\\DefenderWorkload_...\\cache\\restore\\*.json\\:{PathType:file,ScanTrigger:OnAccess,Process:\"C:\\Tools\\defender-workload-helper.exe\"}'"
+      ],
+      "Preference": "Tier 1 - Validation-only preferred contextual file-pattern recommendation",
+      "Fallbacks": [
+        "Tier 4 - Exact process fallback: Add-MpPreference -ExclusionProcess 'C:\\Tools\\defender-workload-helper.exe'"
       ]
     }
   ]
@@ -201,7 +258,9 @@ Self-elevating wrapper around `defender.ps1` that launches one run, captures a U
 | `-OutputRoot` | `string` | timestamped folder under script directory | Root folder for the run log, summary, and reports. |
 | `-StartAt` | `datetime` | immediate | Exact future local date and time to pass into the main script. |
 | `-StartAtTime` | `string` | immediate | Daily local time-of-day for the next scheduled run, such as `23:30`. |
+| `-StrictCAB` | `switch` | off | Passes `-StrictCAB` through to the main script. |
 | `-ValidateLoad` | `switch` | off | Enables synthetic workload during the run. |
+| `-SyntheticWorkloadMode` | `string` | `Mixed` | Passes the synthetic workload profile through to `defender.ps1`. |
 | `-ValidateExclusions` | `switch` | off | Enables structured exclusion validation during the run. |
 | `-AIMode` | `switch` | off | Enables AI export and AI prompt generation. |
 | `-NoOpenReport` | `switch` | off | Prevents the final HTML report from opening automatically. |
@@ -209,7 +268,8 @@ Self-elevating wrapper around `defender.ps1` that launches one run, captures a U
 Example:
 
 ```powershell
-.\defender-single-run.ps1 -RecordingSeconds 180 -ValidateLoad -ValidateExclusions
+.\defender-single-run.ps1 -RecordingSeconds 180 -ValidateLoad -ValidateExclusions -SyntheticWorkloadMode NativeExe -TopN 100
+.\defender-single-run.ps1 -RecordingSeconds 180 -ValidateLoad -SyntheticWorkloadMode PowerShell -TopN 100 -NoOpenReport
 .\defender-single-run.ps1 -StartAtTime "23:30" -RecordingSeconds 300 -TopN 30
 ```
 
@@ -227,6 +287,7 @@ Example `run_summary.json`:
 {
   "RecordingSeconds": 180,
   "ValidateLoad": true,
+  "SyntheticWorkloadMode": "NativeExe",
   "ValidateExclusions": true,
   "ExitCode": 0,
   "JsonReport": "C:\\Runs\\single_run_20260403_170847\\DefenderPerf_20260403_171252.json",
@@ -247,12 +308,16 @@ Self-elevating loop harness that repeatedly calls `defender-test.ps1` and mainta
 | `-OutputRoot` | `string` | timestamped loop folder | Folder where cycle subfolders and `loop_summary.json` are written. |
 | `-StartAt` | `datetime` | immediate | Exact future local date and time for the first validation cycle. |
 | `-StartAtTime` | `string` | immediate | Daily local time-of-day for the next first-cycle start. |
+| `-StrictCAB` | `switch` | off | Passes `-StrictCAB` through to each validation cycle. |
+| `-SyntheticWorkloadMode` | `string` | `Mixed` | Passes the synthetic workload profile through to each validation cycle. |
 | `-StopOnFailure` | `switch` | off | Stops the loop after the first failed cycle. |
 
 Example:
 
 ```powershell
 .\defender-validation-loop.ps1 -Iterations 3 -RecordingSeconds 180 -WaitMinutes 3
+.\defender-validation-loop.ps1 -Iterations 1 -RecordingSeconds 180 -TopN 100 -SyntheticWorkloadMode PowerShell -WaitMinutes 0
+.\defender-validation-loop.ps1 -Iterations 1 -RecordingSeconds 180 -TopN 100 -SyntheticWorkloadMode NativeExe -WaitMinutes 0
 .\defender-validation-loop.ps1 -StartAtTime "23:30" -Iterations 2 -RecordingSeconds 180 -WaitMinutes 3
 ```
 
@@ -286,6 +351,8 @@ Automated harness that runs `defender.ps1` with validation flags enabled, then c
 | `-OutputRoot` | `string` | script directory | Root folder for test logs, reports, and validation result JSON. |
 | `-StartAt` | `datetime` | immediate | Exact future local date and time to pass into the main script. |
 | `-StartAtTime` | `string` | immediate | Daily local time-of-day for the next scheduled validation run. |
+| `-StrictCAB` | `switch` | off | Runs the validation harness against strict fresh-CAB enforcement. |
+| `-SyntheticWorkloadMode` | `string` | `Mixed` | Selects the synthetic workload profile to pass into `defender.ps1`. |
 | `-AIMode` | `switch` | off | Enables AI export generation during the test run. |
 | `-NoAutoClose` | `switch` | off | Keeps the harness window open at the end. |
 | `-NoOpenReport` | `switch` | off | Prevents the generated HTML report from opening. |
@@ -294,6 +361,8 @@ Example:
 
 ```powershell
 .\defender-test.ps1 -RecordingSeconds 180 -TopN 25 -OutputRoot C:\DefenderTestRuns -NoOpenReport
+.\defender-test.ps1 -RecordingSeconds 180 -TopN 100 -SyntheticWorkloadMode PowerShell -OutputRoot C:\DefenderTestRuns -NoOpenReport
+.\defender-test.ps1 -RecordingSeconds 180 -TopN 100 -SyntheticWorkloadMode NativeExe -OutputRoot C:\DefenderTestRuns -NoOpenReport
 .\defender-test.ps1 -StartAtTime "23:30" -RecordingSeconds 180 -TopN 25 -NoOpenReport
 ```
 
@@ -325,11 +394,14 @@ Synthetic workload generator used to create build, cache, archive, and log churn
 | --- | --- | --- | --- |
 | `-DurationSeconds` | `int` | `30` | Length of the synthetic workload run. |
 | `-WorkDir` | `string` | temp folder under `%TEMP%` | Root temporary directory for generated workload files. |
+| `-Mode` | `string` | `Mixed` | Chooses the synthetic workload profile: `Mixed`, `PowerShell`, or `NativeExe`. |
 
 Example:
 
 ```powershell
 .\defender-workload.ps1 -DurationSeconds 180
+.\defender-workload.ps1 -DurationSeconds 180 -Mode PowerShell
+.\defender-workload.ps1 -DurationSeconds 180 -Mode NativeExe
 ```
 
 Typical output:
@@ -369,6 +441,45 @@ Extraction complete.
 Log saved to: C:\Temp\cab_contents.log
 ```
 
+### `defender-compare.ps1`
+
+Compare mode for two saved `DefenderPerf_*.json` reports. It highlights changes in discovered exclusions, recommendation output, extension hotspots, scan contexts, and CAB-derived intelligence, then writes a JSON and HTML comparison report.
+
+| Parameter | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `-BaselineReport` | `string` | required | Older or reference report JSON file. |
+| `-CurrentReport` | `string` | required | Newer report JSON file to compare against the baseline. |
+| `-OutputPath` | `string` | current report folder | Folder where compare JSON and HTML outputs are written. |
+| `-NoOpenReport` | `switch` | off | Prevents the generated HTML compare report from opening automatically. |
+
+Example:
+
+```powershell
+.\defender-compare.ps1 -BaselineReport C:\Reports\DefenderPerf_A.json -CurrentReport C:\Reports\DefenderPerf_B.json -OutputPath C:\Reports\Compare
+```
+
+Typical output:
+
+```text
+JSON compare report: C:\Reports\Compare\DefenderPerfCompare_20260403_201804.json
+HTML compare report: C:\Reports\Compare\DefenderPerfCompare_20260403_201804.html
+```
+
+### `defender-offline-fixture-tests.ps1`
+
+Runs the deterministic offline fixture suite. This validates CAB parsing, recommendation ranking, and compare mode without needing a live Defender trace, admin rights, or a fresh support CAB.
+
+| Parameter | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `-OutputRoot` | `string` | timestamped folder under `tests\results` | Folder where the fixture result JSON and compare-mode outputs are written. |
+
+Example:
+
+```powershell
+.\defender-offline-fixture-tests.ps1
+.\defender-offline-fixture-tests.ps1 -OutputRoot C:\Temp\DefenderOfflineTests
+```
+
 ## Outputs
 
 The main script produces some or all of the following files in the report folder:
@@ -386,6 +497,9 @@ The helper wrappers can also produce:
 - `test_run_<timestamp>.log`
 - `test_result_<timestamp>.json`
 - `loop_summary.json`
+- `DefenderPerfCompare_<timestamp>.json`
+- `DefenderPerfCompare_<timestamp>.html`
+- `tests\results\offline_<timestamp>\offline_fixture_test_result.json`
 
 Example output folder layout:
 

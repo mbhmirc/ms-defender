@@ -1,0 +1,55 @@
+{
+  "ReportMetadata": {
+    "GeneratedAt": "2026-04-01 21:00:00",
+    "ComputerName": "SERVER01",
+    "RecordDuration": 180,
+    "StrictCAB": true
+  },
+  "ExclusionDiscovery": {
+    "Paths": [
+      "D:\\Contoso\\BackupCache\\*.cache"
+    ],
+    "Processes": [],
+    "Extensions": []
+  },
+  "CABIntelligence": {
+    "PlatformVersions": {
+      "DefenderPlatformVersion": "4.18.26020.6-0"
+    },
+    "NetworkProtection": {
+      "Mode": "audit",
+      "DisabledFeatureCount": 1
+    },
+    "SecurityCenterProducts": [
+      {
+        "DisplayName": "Windows Defender",
+        "ProductPath": "C:\\Program Files\\Windows Defender\\MsMpEng.exe",
+        "ProductState": 397568
+      }
+    ]
+  },
+  "ExclusionSuggestions": [
+    {
+      "Type": "ExtensionHotspot",
+      "Value": ".cache @ D:\\Contoso\\BackupCache",
+      "Command": "Add-MpPreference -ExclusionPath 'D:\\Contoso\\BackupCache\\*.cache'"
+    }
+  ],
+  "SuppressedCandidates": [],
+  "ExtensionHotspots": [
+    {
+      "Extension": ".cache",
+      "RawExtension": "cache",
+      "TotalDurationMs": 15070,
+      "Count": 465,
+      "DominantFolderPath": "D:\\Contoso\\BackupCache"
+    }
+  ],
+  "TopScanContexts": [
+    {
+      "TargetPath": "D:\\Contoso\\BackupCache\\manifest.cache",
+      "ProcessPath": "D:\\Apps\\ContosoBackup\\backup.exe",
+      "ScanType": "OnOpen"
+    }
+  ]
+}

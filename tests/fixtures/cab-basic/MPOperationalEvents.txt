@@ -1,0 +1,9 @@
+********************
+4/3/2026 7:15:00 PM used cloud protection to get additional security intelligence
+Current security intelligence Version: 1.447.142.0
+Current Engine Version: 1.1.26020.3
+Cloud protection intelligence Type: Dynamic Signature
+Persistence Path: C:\ProgramData\Microsoft\Windows Defender\Definition Updates\DynamicSignatures
+Cloud protection intelligence Compilation Timestamp: 2026-04-03T18:51:37.201Z
+Persistence Limit Type: Duration
+Persistence Limit: 30 minutes

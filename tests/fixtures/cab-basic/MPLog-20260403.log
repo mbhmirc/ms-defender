@@ -1,0 +1,13 @@
+2026-04-03T18:51:37.201Z Dynamic signature dropped
+Dynamic Signature Type: Signature Update
+Signature Path: C:\ProgramData\Microsoft\Windows Defender\Definition Updates\DynamicSignatures\sig.bin
+Dynamic Signature Compilation Timestamp: 2026-04-03T18:50:00Z
+Persistence Type: Duration
+Time remaining: 00:29:00
+
+2026-04-03T18:52:00.000Z
+PathExclusion: D:\Contoso\BackupCache\*.cache
+ProcessExclusion: D:\Apps\ContosoBackup\backup.exe
+ExtensionExclusion: .cache
+ProcessImageName: D:\Apps\ContosoBackup\backup.exe
+EstimatedImpact: High

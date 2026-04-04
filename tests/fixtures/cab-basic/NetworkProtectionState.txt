@@ -1,0 +1,2 @@
+Network Protection is currently set in block mode
+{"disableTlsParsing":true,"disableDnsSinkhole":false}

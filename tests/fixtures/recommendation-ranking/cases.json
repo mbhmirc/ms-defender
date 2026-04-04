@@ -1,0 +1,168 @@
+[
+  {
+    "Name": "Synthetic workload .json stays suppressed",
+    "Input": {
+      "PerfReport": {
+        "TopExtensions": [
+          {
+            "Extension": ".json",
+            "TotalDuration": 32320,
+            "Count": 1305,
+            "Scans": [
+              {
+                "Path": "C:\\Temp\\DefenderWorkload_20260403_164507\\logs\\one.json",
+                "TotalDuration": 2380,
+                "ProcessPath": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                "Image": "powershell.exe"
+              },
+              {
+                "Path": "C:\\Temp\\DefenderWorkload_20260403_164507\\project\\obj\\Debug\\net8.0\\two.json",
+                "TotalDuration": 1070,
+                "ProcessPath": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                "Image": "powershell.exe"
+              }
+            ]
+          }
+        ],
+        "TopScans": [
+          {
+            "Path": "C:\\Temp\\DefenderWorkload_20260403_164507\\logs\\one.json",
+            "ProcessPath": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            "ScanType": "OnOpen",
+            "Reason": "RealTime",
+            "TotalDuration": 5000,
+            "Comments": [
+              "OnOpen C:\\Temp\\DefenderWorkload_20260403_164507\\logs\\one.json lasted 23800000",
+              "OnOpen C:\\Temp\\DefenderWorkload_20260403_164507\\project\\obj\\Debug\\net8.0\\two.json lasted 10700000"
+            ]
+          }
+        ],
+        "TopProcesses": [
+          {
+            "Process": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            "TotalDuration": 32000
+          }
+        ]
+      },
+      "DiscoveredExclusions": {
+        "Paths": [],
+        "Processes": [],
+        "Extensions": []
+      },
+      "ContextualExclusionsSupported": true,
+      "ValidateLoad": true
+    },
+    "Expected": {
+      "SuggestionCount": 0,
+      "SuppressedCount": 1,
+      "SuppressedType": "ValidationOnlyPattern",
+      "SuppressedCommandContains": [
+        "*.json",
+        "DefenderWorkload_"
+      ]
+    }
+  },
+  {
+    "Name": "Safe folder .cache becomes file-pattern path",
+    "Input": {
+      "PerfReport": {
+        "TopExtensions": [
+          {
+            "Extension": ".cache",
+            "TotalDuration": 15070,
+            "Count": 465,
+            "Scans": [
+              {
+                "Path": "D:\\Contoso\\BackupCache\\manifest.cache",
+                "TotalDuration": 2440,
+                "ProcessPath": "D:\\Apps\\ContosoBackup\\backup.exe",
+                "Image": "backup.exe"
+              }
+            ]
+          }
+        ],
+        "TopScans": [
+          {
+            "Path": "D:\\Contoso\\BackupCache\\manifest.cache",
+            "ProcessPath": "D:\\Apps\\ContosoBackup\\backup.exe",
+            "ScanType": "OnOpen",
+            "Reason": "RealTime",
+            "TotalDuration": 6000,
+            "Comments": [
+              "OnOpen D:\\Contoso\\BackupCache\\manifest.cache lasted 24400000"
+            ]
+          }
+        ],
+        "TopProcesses": [
+          {
+            "Process": "D:\\Apps\\ContosoBackup\\backup.exe",
+            "TotalDuration": 11000
+          }
+        ]
+      },
+      "DiscoveredExclusions": {
+        "Paths": [],
+        "Processes": [],
+        "Extensions": []
+      },
+      "ContextualExclusionsSupported": false,
+      "ValidateLoad": false
+    },
+    "Expected": {
+      "SuggestionCount": 2,
+      "FirstSuggestionType": "ExtensionHotspot",
+      "ContainsSuggestionCommand": "Add-MpPreference -ExclusionPath 'D:\\Contoso\\BackupCache\\*.cache'"
+    }
+  },
+  {
+    "Name": "Trusted builder gets contextual file-pattern exclusion",
+    "Input": {
+      "PerfReport": {
+        "TopExtensions": [
+          {
+            "Extension": ".pdb",
+            "TotalDuration": 6780,
+            "Count": 338,
+            "Scans": [
+              {
+                "Path": "D:\\Build\\project\\obj\\Debug\\app.pdb",
+                "TotalDuration": 2730,
+                "ProcessPath": "D:\\Tools\\builder.exe",
+                "Image": "builder.exe"
+              }
+            ]
+          }
+        ],
+        "TopScans": [
+          {
+            "Path": "D:\\Build\\project\\obj\\Debug\\app.pdb",
+            "ProcessPath": "D:\\Tools\\builder.exe",
+            "ScanType": "OnOpen",
+            "Reason": "RealTime",
+            "TotalDuration": 4200,
+            "Comments": [
+              "OnOpen D:\\Build\\project\\obj\\Debug\\app.pdb lasted 27300000"
+            ]
+          }
+        ],
+        "TopProcesses": [
+          {
+            "Process": "D:\\Tools\\builder.exe",
+            "TotalDuration": 9000
+          }
+        ]
+      },
+      "DiscoveredExclusions": {
+        "Paths": [],
+        "Processes": [],
+        "Extensions": []
+      },
+      "ContextualExclusionsSupported": true,
+      "ValidateLoad": false
+    },
+    "Expected": {
+      "ContainsSuggestionCommand": "PathType:file,ScanTrigger:OnAccess,Process:\"D:\\Tools\\builder.exe\"",
+      "ContainsSuggestionValue": ".pdb @ D:\\Build\\project\\obj\\Debug"
+    }
+  }
+]

@@ -1,0 +1,2 @@
+SomeApp.exe
+Debugger = C:\Tools\debugger.exe

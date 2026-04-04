@@ -12,7 +12,10 @@ param(
     [string]$OutputRoot,
     [datetime]$StartAt,
     [string]$StartAtTime,
+    [switch]$StrictCAB,
     [switch]$AIMode,
+    [ValidateSet('Mixed', 'PowerShell', 'NativeExe')]
+    [string]$SyntheticWorkloadMode = 'Mixed',
     [switch]$NoAutoClose,
     [switch]$NoOpenReport
 )
@@ -65,7 +68,7 @@ Write-Host "  Reports    : $reportDir" -ForegroundColor Gray
 Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host ""
 
-Write-Phase "RUN" "Executing defender.ps1 with -ValidateLoad -ValidateExclusions$(if($AIMode){' -AIMode'}else{''})..."
+Write-Phase "RUN" "Executing defender.ps1 with -ValidateLoad -ValidateExclusions -SyntheticWorkloadMode $SyntheticWorkloadMode$(if($AIMode){' -AIMode'}else{''})..."
 Write-Phase "RUN" "Estimated time: ~$([math]::Ceiling($RecordingSeconds * 2.5))s (recording + analysis + CAB)"
 if ($PSBoundParameters.ContainsKey('StartAt') -or $PSBoundParameters.ContainsKey('StartAtTime')) {
     Write-Phase "RUN" ("Scheduled start requested: {0}" -f $(if ($PSBoundParameters.ContainsKey('StartAt')) { $StartAt.ToString('yyyy-MM-dd HH:mm:ss') } else { $StartAtTime }))
@@ -79,6 +82,7 @@ try {
         TopN               = $TopN
         ReportPath         = $reportDir
         ValidateLoad       = $true
+        SyntheticWorkloadMode = $SyntheticWorkloadMode
         ValidateExclusions = $true
         NoOpenReport       = $NoOpenReport
     }
@@ -87,6 +91,9 @@ try {
     }
     if ($PSBoundParameters.ContainsKey('StartAtTime')) {
         $defenderParams['StartAtTime'] = $StartAtTime
+    }
+    if ($StrictCAB) {
+        $defenderParams['StrictCAB'] = $true
     }
     if ($AIMode) {
         $defenderParams['AIMode'] = $true
@@ -339,9 +346,14 @@ if ($jsonContent -and $jsonContent.ExclusionSuggestions) {
         $contextualSuggestions = @($suggestions | Where-Object { $_.Type -eq 'ContextualPath' })
         if ($contextualSuggestions.Count -gt 0) {
             $invalidContextual = @($contextualSuggestions | Where-Object {
-                    $_.Command -notmatch 'ScanTrigger:OnAccess' -and $_.Command -notmatch 'Process:"'
+                    $_.Command -notmatch 'ScanTrigger:OnAccess' -or $_.Command -notmatch 'Process:"'
                 })
             Add-Test "Contextual suggestions use scoped syntax" $(if ($invalidContextual.Count -eq 0) { "PASS" } else { "FAIL" }) "$($contextualSuggestions.Count) contextual suggestion(s)"
+
+            $missingContextualPreference = @($contextualSuggestions | Where-Object {
+                    $_.Preference -ne 'Tier 2 - Contextual folder recommendation'
+                })
+            Add-Test "Contextual suggestions expose preference label" $(if ($missingContextualPreference.Count -eq 0) { "PASS" } else { "FAIL" }) "$($contextualSuggestions.Count) contextual suggestion(s)"
         }
 
         $extensionHotspotSuggestions = @($suggestions | Where-Object { $_.Type -eq 'ExtensionHotspot' })
@@ -352,6 +364,27 @@ if ($jsonContent -and $jsonContent.ExclusionSuggestions) {
                     $_.Command -notmatch '\\\*\.[^''"\r\n]+'
                 })
             Add-Test "Extension hotspot suggestions are file-pattern scoped" $(if ($invalidHotspotSuggestions.Count -eq 0) { "PASS" } else { "FAIL" }) "$($extensionHotspotSuggestions.Count) hotspot suggestion(s)"
+
+            $contextualHotspotSuggestions = @($extensionHotspotSuggestions | Where-Object {
+                    $_.Command -match 'PathType:file' -and $_.Command -match 'Process:"'
+                })
+            if ($contextualHotspotSuggestions.Count -gt 0) {
+                $invalidContextualHotspotPreferences = @($contextualHotspotSuggestions | Where-Object {
+                        $_.Preference -ne 'Tier 1 - Preferred contextual file-pattern recommendation'
+                    })
+                Add-Test "Contextual hotspot suggestions expose tiered preference" $(if ($invalidContextualHotspotPreferences.Count -eq 0) { "PASS" } else { "FAIL" }) "$($contextualHotspotSuggestions.Count) contextual hotspot suggestion(s)"
+
+                $missingContextualHotspotFallbacks = @($contextualHotspotSuggestions | Where-Object {
+                        @($_.Fallbacks).Count -eq 0 -or
+                        @($_.Fallbacks | Where-Object { $_ -like 'Tier 4 - Exact process fallback:*' }).Count -eq 0
+                    })
+                Add-Test "Contextual hotspot suggestions include fallback ladder" $(if ($missingContextualHotspotFallbacks.Count -eq 0) { "PASS" } else { "FAIL" }) "$($contextualHotspotSuggestions.Count) contextual hotspot suggestion(s)"
+            }
+
+            $missingHotspotRelativeShare = @($extensionHotspotSuggestions | Where-Object {
+                    $null -eq $_.RelativeSharePercent -or [string]::IsNullOrWhiteSpace([string]$_.RelativeShareBasis)
+                })
+            Add-Test "Extension hotspot suggestions include relative share" $(if ($missingHotspotRelativeShare.Count -eq 0) { "PASS" } else { "FAIL" }) "$($extensionHotspotSuggestions.Count) hotspot suggestion(s)"
         }
 
         $placeholderSuggestions = @($suggestions | Where-Object {
@@ -369,6 +402,16 @@ if ($jsonContent -and $jsonContent.ExclusionSuggestions) {
                 ($_.Type -eq 'ContextualPath' -and $_.Command -match 'Process:\"[A-Za-z]:\\Windows(\\|$)')
             })
         Add-Test "No system-folder process exclusions suggested" $(if ($systemFolderProcessSuggestions.Count -eq 0) { "PASS" } else { "FAIL" }) "$($systemFolderProcessSuggestions.Count) unsafe process suggestion(s)"
+
+        $processSuggestionsMissingTier = @($suggestions | Where-Object {
+                $_.Type -eq 'Process' -and $_.Preference -ne 'Tier 4 - Exact process fallback recommendation'
+            })
+        Add-Test "Process suggestions are clearly marked as fallback" $(if ($processSuggestionsMissingTier.Count -eq 0) { "PASS" } else { "FAIL" }) "$($processSuggestionsMissingTier.Count) process suggestion(s) missing fallback label"
+
+        $validationHelperSuggestions = @($suggestions | Where-Object {
+                $_.Type -eq 'Process' -and $_.Value -match 'defender-workload-helper\.exe$'
+            })
+        Add-Test "Synthetic helper process not promoted live" $(if ($validationHelperSuggestions.Count -eq 0) { "PASS" } else { "FAIL" }) "$($validationHelperSuggestions.Count) helper process suggestion(s)"
     }
     else {
         Add-Test "Exclusion suggestions generated" "WARN" "No suggestions (may be expected)"
@@ -420,6 +463,27 @@ if ($jsonContent -and $jsonContent.PSObject.Properties['SuppressedCandidates']) 
                     }).Count -gt 0
             })
         Add-Test "Suppressed candidates are file-pattern scoped" $(if ($invalidSuppressedPatterns.Count -eq 0) { "PASS" } else { "FAIL" }) "$($invalidSuppressedPatterns.Count) invalid candidate(s)"
+
+        $contextualSuppressed = @($suppressedCandidates | Where-Object { $_.Type -eq 'ValidationOnlyContextualPattern' })
+        if ($contextualSuppressed.Count -gt 0) {
+            $invalidContextualSuppressed = @($contextualSuppressed | Where-Object {
+                    @($_.Commands | Where-Object {
+                            $_ -notmatch 'PathType:file' -or
+                            $_ -notmatch 'ScanTrigger:OnAccess' -or
+                            $_ -notmatch 'Process:"'
+                        }).Count -gt 0 -or
+                    $_.Preference -ne 'Tier 1 - Validation-only preferred contextual file-pattern recommendation'
+            })
+            Add-Test "Suppressed contextual candidates use scoped syntax" $(if ($invalidContextualSuppressed.Count -eq 0) { "PASS" } else { "FAIL" }) "$($contextualSuppressed.Count) contextual candidate(s)"
+
+            $missingSuppressedRelativeShare = @($contextualSuppressed | Where-Object {
+                    $null -eq $_.RelativeSharePercent -or [string]::IsNullOrWhiteSpace([string]$_.RelativeShareBasis)
+                })
+            Add-Test "Suppressed contextual candidates include relative share" $(if ($missingSuppressedRelativeShare.Count -eq 0) { "PASS" } else { "FAIL" }) "$($contextualSuppressed.Count) contextual candidate(s)"
+        }
+        elseif ($ValidateLoad) {
+            Add-Test "Suppressed contextual candidates use scoped syntax" "WARN" "No validation-only contextual candidates recorded"
+        }
     }
     elseif ($ValidateLoad) {
         Add-Test "Suppressed candidates captured during validation load" "WARN" "No suppressed candidates recorded"
@@ -622,6 +686,7 @@ $resultData = [ordered]@{
     ElapsedSec   = [math]::Round($totalElapsed.TotalSeconds, 1)
     ScheduleMode = if ($PSBoundParameters.ContainsKey('StartAt')) { 'DateTime' } elseif ($PSBoundParameters.ContainsKey('StartAtTime')) { 'TimeOfDay' } else { 'Immediate' }
     ScheduleInput = if ($PSBoundParameters.ContainsKey('StartAt')) { $StartAt.ToString('yyyy-MM-dd HH:mm:ss') } elseif ($PSBoundParameters.ContainsKey('StartAtTime')) { $StartAtTime } else { $null }
+    StrictCAB    = [bool]$StrictCAB
     TotalTests   = $tests.Count
     Passed       = $pass
     Warned       = $warn

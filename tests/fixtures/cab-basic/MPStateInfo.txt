@@ -1,0 +1,7 @@
+Threat Stats : Threats(1) Suspicious(0)
+Overall product status : 0x80000
+Auto scan enabled
+Auto sigupdate enabled
+Realtime monitor enabled
+OnAccess protection enabled
+IOAV protection enabled

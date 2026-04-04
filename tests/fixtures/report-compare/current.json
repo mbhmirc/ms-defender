@@ -1,0 +1,85 @@
+{
+  "ReportMetadata": {
+    "GeneratedAt": "2026-04-03 21:00:00",
+    "ComputerName": "SERVER01",
+    "RecordDuration": 180,
+    "StrictCAB": true
+  },
+  "ExclusionDiscovery": {
+    "Paths": [
+      "D:\\Contoso\\BackupCache\\*.cache",
+      "D:\\Build\\project\\obj\\Debug\\*.pdb"
+    ],
+    "Processes": [
+      "D:\\Apps\\ContosoBackup\\backup.exe"
+    ],
+    "Extensions": []
+  },
+  "CABIntelligence": {
+    "PlatformVersions": {
+      "DefenderPlatformVersion": "4.18.26030.4-0"
+    },
+    "NetworkProtection": {
+      "Mode": "block",
+      "DisabledFeatureCount": 0
+    },
+    "SecurityCenterProducts": [
+      {
+        "DisplayName": "Windows Defender",
+        "ProductPath": "C:\\Program Files\\Windows Defender\\MsMpEng.exe",
+        "ProductState": 397568
+      },
+      {
+        "DisplayName": "Contoso AV",
+        "ProductPath": "D:\\ContosoAV\\contosoav.exe",
+        "ProductState": 393216
+      }
+    ]
+  },
+  "ExclusionSuggestions": [
+    {
+      "Type": "ExtensionHotspot",
+      "Value": ".cache @ D:\\Contoso\\BackupCache",
+      "Command": "Add-MpPreference -ExclusionPath 'D:\\Contoso\\BackupCache\\*.cache'"
+    },
+    {
+      "Type": "ExtensionHotspot",
+      "Value": ".pdb @ D:\\Build\\project\\obj\\Debug",
+      "Command": "Add-MpPreference -ExclusionPath 'D:\\Build\\project\\obj\\Debug\\*.pdb\\:{PathType:file,ScanTrigger:OnAccess,Process:\"D:\\Tools\\builder.exe\"}'"
+    }
+  ],
+  "SuppressedCandidates": [
+    {
+      "Type": "ValidationOnlyPattern",
+      "Value": ".json @ synthetic workload folders"
+    }
+  ],
+  "ExtensionHotspots": [
+    {
+      "Extension": ".cache",
+      "RawExtension": "cache",
+      "TotalDurationMs": 8300,
+      "Count": 220,
+      "DominantFolderPath": "D:\\Contoso\\BackupCache"
+    },
+    {
+      "Extension": ".pdb",
+      "RawExtension": "pdb",
+      "TotalDurationMs": 6780,
+      "Count": 338,
+      "DominantFolderPath": "D:\\Build\\project\\obj\\Debug"
+    }
+  ],
+  "TopScanContexts": [
+    {
+      "TargetPath": "D:\\Contoso\\BackupCache\\manifest.cache",
+      "ProcessPath": "D:\\Apps\\ContosoBackup\\backup.exe",
+      "ScanType": "OnOpen"
+    },
+    {
+      "TargetPath": "D:\\Build\\project\\obj\\Debug\\app.pdb",
+      "ProcessPath": "D:\\Tools\\builder.exe",
+      "ScanType": "OnOpen"
+    }
+  ]
+}

@@ -41,10 +41,19 @@
     occurrence of that time. Example: 23:30 starts tonight if still in the
     future, otherwise tomorrow night.
 
+.PARAMETER StrictCAB
+    Generate and bind the report to one fresh MpSupportFiles.cab snapshot for
+    this run. If a fresh CAB cannot be produced, the script stops instead of
+    silently falling back to an older CAB.
+
 .PARAMETER ValidateLoad
     Generate synthetic file/process workload during the recording period to
     produce meaningful scan data for testing or baseline analysis. For real
     troubleshooting, prefer running during the actual workload issue instead.
+
+.PARAMETER SyntheticWorkloadMode
+    Select the synthetic workload type used with -ValidateLoad:
+    Mixed (default), PowerShell, or NativeExe.
 
 .PARAMETER ValidateExclusions
     Add a temporary test exclusion and verify each discovery method can find it,
@@ -67,8 +76,10 @@
     .\defender.ps1
     .\defender.ps1 -RecordingSeconds 300 -TopN 30
     .\defender.ps1 -ValidateLoad -ValidateExclusions -VerboseCAB
+    .\defender.ps1 -ValidateLoad -SyntheticWorkloadMode NativeExe -TopN 100
     .\defender.ps1 -RecordingSeconds 120 -ReportPath "C:\Reports"
     .\defender.ps1 -StartAtTime "23:30" -RecordingSeconds 300 -ReportPath "C:\Reports"
+    .\defender.ps1 -StrictCAB -RecordingSeconds 300 -ReportPath "C:\Reports"
     .\defender.ps1 -RecordingSeconds 120 -AIMode
 #>
 [CmdletBinding()]
@@ -85,7 +96,12 @@ param(
 
     [string]$StartAtTime,
 
+    [switch]$StrictCAB,
+
     [switch]$ValidateLoad,
+
+    [ValidateSet('Mixed', 'PowerShell', 'NativeExe')]
+    [string]$SyntheticWorkloadMode = 'Mixed',
 
     [switch]$ValidateExclusions,
 
@@ -181,7 +197,7 @@ function HtmlEncode([string]$s) {
 
 function Resolve-ScheduledStart {
     param(
-        [datetime]$ExplicitStart,
+        [Nullable[datetime]]$ExplicitStart,
         [string]$TimeOfDay,
         [bool]$ExplicitStartSpecified,
         [bool]$TimeOfDaySpecified
@@ -314,6 +330,22 @@ function Format-ContextualExclusionPath([string]$path, [string]$pathType, [strin
     $cleanPath = $path.TrimEnd('\')
     $escapedProcess = $processPath -replace '"', '\"'
     return "{0}\:{{PathType:{1},ScanTrigger:{2},Process:""{3}""}}" -f $cleanPath, $pathType, $scanTrigger, $escapedProcess
+}
+
+function Format-ExclusionProcessCommand([string]$processPath) {
+    if ([string]::IsNullOrWhiteSpace($processPath)) { return $null }
+    return "Add-MpPreference -ExclusionProcess '$($processPath -replace "'", "''")'"
+}
+
+function New-RankedFallback {
+    param(
+        [int]$TierOrder,
+        [string]$Label,
+        [string]$Command
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Command)) { return $null }
+    return "Tier $TierOrder - ${Label}: $Command"
 }
 
 function Invoke-ExternalTool {
@@ -453,7 +485,8 @@ function Get-NormalizedTextLines([string]$Path) {
 function Get-MpSupportCabPath {
     param(
         [datetime]$NewerThan = [datetime]::MinValue,
-        [int]$TimeoutSeconds = 15
+        [int]$TimeoutSeconds = 15,
+        [switch]$AllowStaleFallback = $true
     )
 
     $candidatePaths = @(
@@ -478,13 +511,101 @@ function Get-MpSupportCabPath {
         Start-Sleep -Milliseconds 500
     } while ((Get-Date) -lt $deadline)
 
-    foreach ($candidate in $candidatePaths) {
-        if (Test-Path -LiteralPath $candidate) {
-            return (Get-Item -LiteralPath $candidate -ErrorAction SilentlyContinue).FullName
+    if ($AllowStaleFallback) {
+        foreach ($candidate in $candidatePaths) {
+            if (Test-Path -LiteralPath $candidate) {
+                return (Get-Item -LiteralPath $candidate -ErrorAction SilentlyContinue).FullName
+            }
         }
     }
 
     return $null
+}
+
+function Get-FileSha256Hex([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return $null }
+
+    try {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+    }
+    catch {
+        return $null
+    }
+}
+
+function New-ReportCabSnapshot {
+    param(
+        [switch]$Strict,
+        [string]$Purpose = 'Report'
+    )
+
+    $snapshot = [ordered]@{
+        Purpose            = $Purpose
+        StrictMode         = [bool]$Strict
+        RequestedAt        = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+        GenerateExitCode   = $null
+        Path               = $null
+        LastWriteTime      = $null
+        FileSizeBytes      = $null
+        SHA256             = $null
+        Fresh              = $false
+        StaleFallbackUsed  = $false
+        Error              = $null
+    }
+
+    $mpCmdRun = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+    if (-not (Test-Path -LiteralPath $mpCmdRun)) {
+        $mpCmdRun = "${env:ProgramW6432}\Windows Defender\MpCmdRun.exe"
+    }
+
+    if (-not (Test-Path -LiteralPath $mpCmdRun)) {
+        $snapshot['Error'] = 'MpCmdRun.exe not found'
+        if ($Strict) {
+            throw "StrictCAB is enabled but MpCmdRun.exe was not found."
+        }
+
+        return [PSCustomObject]$snapshot
+    }
+
+    $requestedAt = Get-Date
+    $snapshot['RequestedAt'] = $requestedAt.ToString('yyyy-MM-dd HH:mm:ss')
+
+    try {
+        $getFilesResult = Invoke-ExternalTool -FilePath $mpCmdRun -ArgumentList @('-GetFiles') -IgnoreExitCode
+        $snapshot['GenerateExitCode'] = $getFilesResult.ExitCode
+    }
+    catch {
+        $snapshot['Error'] = $_.Exception.Message
+        if ($Strict) {
+            throw "StrictCAB is enabled and MpCmdRun.exe -GetFiles failed: $($_.Exception.Message)"
+        }
+    }
+
+    $cabPath = Get-MpSupportCabPath -NewerThan $requestedAt.AddSeconds(-1) -TimeoutSeconds 20 -AllowStaleFallback:(-not $Strict)
+    if (-not $cabPath) {
+        $snapshot['Error'] = if ($Strict) { 'No fresh CAB snapshot found' } else { 'No CAB snapshot found' }
+        if ($Strict) {
+            throw "StrictCAB is enabled and no fresh MpSupportFiles.cab snapshot was produced for this run."
+        }
+
+        return [PSCustomObject]$snapshot
+    }
+
+    $cabItem = Get-Item -LiteralPath $cabPath -ErrorAction SilentlyContinue
+    $isFresh = [bool]($cabItem -and $cabItem.LastWriteTime -ge $requestedAt.AddSeconds(-1))
+
+    $snapshot['Path'] = $cabPath
+    $snapshot['LastWriteTime'] = if ($cabItem) { $cabItem.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
+    $snapshot['FileSizeBytes'] = if ($cabItem) { [int64]$cabItem.Length } else { $null }
+    $snapshot['SHA256'] = Get-FileSha256Hex $cabPath
+    $snapshot['Fresh'] = $isFresh
+    $snapshot['StaleFallbackUsed'] = -not $isFresh
+
+    if ($Strict -and -not $isFresh) {
+        throw "StrictCAB is enabled and the available CAB snapshot is stale."
+    }
+
+    return [PSCustomObject]$snapshot
 }
 
 # Get duration in ms — handles TimeSpan, double, ticks, and -Raw output
@@ -665,15 +786,24 @@ $script:suggestedPaths = [System.Collections.Generic.HashSet[string]]::new(
     [System.StringComparer]::OrdinalIgnoreCase)
 $script:suggestedContextualKeys = [System.Collections.Generic.HashSet[string]]::new(
     [System.StringComparer]::OrdinalIgnoreCase)
+$script:coveredProcessPaths = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase)
 $script:extensionHotspots = @()
 $script:topScanContexts = @()
 
 function Add-Suggestion {
     param([string]$Type, [string]$Value, [string]$Reason, [string]$Impact, [string]$Command,
-          [string]$Risk = 'SAFE', [string]$Advisory = '', [string]$Scope = '')
+          [string]$Risk = 'SAFE', [string]$Advisory = '', [string]$Scope = '', [string]$Preference = '',
+          [int]$TierOrder = 99, [string[]]$Fallbacks = @(), [string]$RelatedProcessPath = '',
+          $RelativeSharePercent = $null, [string]$RelativeShareBasis = '',
+          $ConcentrationPercent = $null, [string]$ConcentrationBasis = '')
     $script:suggestions.Add([PSCustomObject]@{
             Type = $Type; Value = $Value; Reason = $Reason; Impact = $Impact
-            Command = $Command; Risk = $Risk; Advisory = $Advisory; Scope = $Scope
+            Command = $Command; Risk = $Risk; Advisory = $Advisory; Scope = $Scope; Preference = $Preference
+            TierOrder = $TierOrder; Fallbacks = @($Fallbacks | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+            RelatedProcessPath = $RelatedProcessPath
+            RelativeSharePercent = $RelativeSharePercent; RelativeShareBasis = $RelativeShareBasis
+            ConcentrationPercent = $ConcentrationPercent; ConcentrationBasis = $ConcentrationBasis
         })
 }
 
@@ -686,7 +816,11 @@ function Add-SuppressedSuggestion {
         [string]$SuppressedBecause,
         [string[]]$Commands = @(),
         [string]$Scope = '',
-        [string]$Evidence = ''
+        [string]$Evidence = '',
+        [string]$Preference = '',
+        [string[]]$Fallbacks = @(),
+        $RelativeSharePercent = $null, [string]$RelativeShareBasis = '',
+        $ConcentrationPercent = $null, [string]$ConcentrationBasis = ''
     )
 
     $script:suppressedSuggestions.Add([PSCustomObject]@{
@@ -698,6 +832,12 @@ function Add-SuppressedSuggestion {
             Commands          = @($Commands | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
             Scope             = $Scope
             Evidence          = $Evidence
+            Preference        = $Preference
+            Fallbacks         = @($Fallbacks | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+            RelativeSharePercent = $RelativeSharePercent
+            RelativeShareBasis   = $RelativeShareBasis
+            ConcentrationPercent = $ConcentrationPercent
+            ConcentrationBasis   = $ConcentrationBasis
         })
 }
 
@@ -717,6 +857,20 @@ function Get-ImpactLevel([double]$ms) {
     if ($ms -ge $thresholdHigh) { return "HIGH" }
     if ($ms -ge $thresholdMedium) { return "MEDIUM" }
     return "LOW"
+}
+
+function Get-ImpactOrder([string]$impact) {
+    switch ($impact) {
+        'HIGH' { return 0 }
+        'MEDIUM' { return 1 }
+        'LOW' { return 2 }
+        default { return 3 }
+    }
+}
+
+function Get-RelativeSharePercent([double]$durationMs, [double]$totalMs) {
+    if ($totalMs -le 0) { return $null }
+    return [math]::Round(($durationMs / $totalMs) * 100, 1)
 }
 
 function Get-ImpactColour([string]$impact) {
@@ -952,11 +1106,13 @@ if ($ValidateExclusions) {
                 $cabRequestedAt = Get-Date
                 $getFilesResult = Invoke-ExternalTool -FilePath $mpCmdRun -ArgumentList @('-GetFiles') -IgnoreExitCode
                 $method3Evidence['GetFilesExitCode'] = $getFilesResult.ExitCode
-                $cabPath = Get-MpSupportCabPath -NewerThan $cabRequestedAt.AddSeconds(-1) -TimeoutSeconds 20
+                $cabPath = Get-MpSupportCabPath -NewerThan $cabRequestedAt.AddSeconds(-1) -TimeoutSeconds 20 -AllowStaleFallback:$false
                 if ($cabPath -and (Test-Path -LiteralPath $cabPath)) {
                     $cabItem = Get-Item -LiteralPath $cabPath -ErrorAction SilentlyContinue
                     $method3Evidence['CabPath'] = $cabPath
                     $method3Evidence['CabLastWriteTime'] = if ($cabItem) { $cabItem.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
+                    $method3Evidence['CabSha256'] = Get-FileSha256Hex $cabPath
+                    $method3Evidence['FreshCab'] = [bool]($cabItem -and $cabItem.LastWriteTime -ge $cabRequestedAt.AddSeconds(-1))
                     $extractDir = Join-Path $env:TEMP "DefenderCAB_Validate_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
                     New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
                     Invoke-ExternalTool -FilePath 'expand.exe' -ArgumentList @($cabPath, '-F:*', $extractDir) | Out-Null
@@ -1050,9 +1206,40 @@ if ($ValidateExclusions) {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  STEP 2 — DISCOVER EXCLUSIONS (Multi-source: cmdlet -> registry -> CAB)
+#  STEP 2 — PREPARE CAB SNAPSHOT
 # ═══════════════════════════════════════════════════════════════════════════════
-Write-Section "2 - Discovering Exclusions (Hidden-Exclusion Aware)"
+Write-Section "2 - Preparing CAB Snapshot"
+
+$script:reportCabSnapshot = $null
+
+try {
+    $script:reportCabSnapshot = New-ReportCabSnapshot -Strict:$StrictCAB -Purpose 'Report'
+
+    if ($script:reportCabSnapshot.Path) {
+        $cabSizeMb = if ($script:reportCabSnapshot.FileSizeBytes) { [math]::Round(($script:reportCabSnapshot.FileSizeBytes / 1MB), 2) } else { $null }
+        $freshnessText = if ($script:reportCabSnapshot.Fresh) { 'fresh' } else { 'stale fallback' }
+        Write-OK "CAB snapshot ready: $($script:reportCabSnapshot.Path)"
+        Write-Info "CAB details : $freshnessText, $cabSizeMb MB, $($script:reportCabSnapshot.LastWriteTime)"
+        if ($script:reportCabSnapshot.SHA256) {
+            Write-Info "CAB SHA256  : $($script:reportCabSnapshot.SHA256)"
+        }
+    }
+    elseif ($script:reportCabSnapshot.Error) {
+        Write-Warn "CAB snapshot unavailable: $($script:reportCabSnapshot.Error)"
+    }
+    else {
+        Write-Warn "CAB snapshot unavailable for this run"
+    }
+}
+catch {
+    Write-Bad $_.Exception.Message
+    Exit-Script 1
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  STEP 2b — DISCOVER EXCLUSIONS (Multi-source: cmdlet -> registry -> CAB)
+# ═══════════════════════════════════════════════════════════════════════════════
+Write-Section "2b - Discovering Exclusions (Hidden-Exclusion Aware)"
 
 $exclusionSource = 'none'
 $discoveredExcl = [ordered]@{
@@ -1144,34 +1331,19 @@ if ($exclusionSource -eq 'none') {
 
 # ── Method 3: MpCmdRun -GetFiles CAB extraction ─────────────────────────────
 if ($exclusionSource -eq 'none') {
-    Write-Info "Exclusions hidden -- extracting via MpCmdRun -GetFiles (CAB diagnostic)..."
+    Write-Info "Exclusions hidden -- extracting from the report CAB snapshot..."
 
-    $mpCmdRun = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
-    if (-not (Test-Path $mpCmdRun)) {
-        $mpCmdRun = "${env:ProgramW6432}\Windows Defender\MpCmdRun.exe"
-    }
+    $cabPath = if ($script:reportCabSnapshot) { $script:reportCabSnapshot.Path } else { $null }
 
-    if (Test-Path $mpCmdRun) {
+    if ($cabPath -and (Test-Path -LiteralPath $cabPath)) {
         try {
-            Write-Info "Running MpCmdRun.exe -GetFiles (this may take a moment)..."
-            $cabRequestedAt = Get-Date
-            $getFilesResult = Invoke-ExternalTool -FilePath $mpCmdRun -ArgumentList @('-GetFiles') -IgnoreExitCode
-            if ($getFilesResult.ExitCode -ne 0) {
-                Write-Warn "MpCmdRun -GetFiles exited with code $($getFilesResult.ExitCode)"
-            }
-            Write-Info "MpCmdRun output: $($getFilesResult.Output | Select-Object -First 3)"
+            Write-OK  "Using CAB snapshot: $cabPath ($([math]::Round((Get-Item $cabPath).Length / 1MB, 1)) MB)"
 
-            # The CAB is generated at a known location
-            $cabPath = Get-MpSupportCabPath -NewerThan $cabRequestedAt.AddSeconds(-1) -TimeoutSeconds 20
-
-            if ($cabPath -and (Test-Path -LiteralPath $cabPath)) {
-                Write-OK  "CAB file found: $cabPath ($([math]::Round((Get-Item $cabPath).Length / 1MB, 1)) MB)"
-
-                # Extract to temp directory
-                $extractDir = Join-Path $env:TEMP "DefenderCAB_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-                New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
-                Invoke-ExternalTool -FilePath 'expand.exe' -ArgumentList @($cabPath, '-F:*', $extractDir) | Out-Null
-                Write-Info "Extracted CAB to: $extractDir"
+            # Extract to temp directory
+            $extractDir = Join-Path $env:TEMP "DefenderCAB_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+            New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
+            Invoke-ExternalTool -FilePath 'expand.exe' -ArgumentList @($cabPath, '-F:*', $extractDir) | Out-Null
+            Write-Info "Extracted CAB to: $extractDir"
 
                 # Parse MpRegistry.txt for exclusion entries
                 $mpRegFile = Get-ChildItem -Path $extractDir -Filter "MpRegistry.txt" -Recurse -ErrorAction SilentlyContinue |
@@ -1264,17 +1436,13 @@ if ($exclusionSource -eq 'none') {
 
                 # Cleanup extracted CAB
                 Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            else {
-                Write-Warn "CAB file not generated at expected location"
-            }
         }
         catch {
             Write-Warn "CAB extraction failed: $_"
         }
     }
     else {
-        Write-Warn "MpCmdRun.exe not found at expected path"
+        Write-Warn "No report CAB snapshot is available for CAB-based exclusion discovery"
     }
 }
 
@@ -1314,13 +1482,13 @@ if ($discoveredExcl.Extensions.Count -gt 0) {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  STEP 2b — CAB DIAGNOSTIC INTELLIGENCE
+#  STEP 2c — CAB DIAGNOSTIC INTELLIGENCE
 # ═══════════════════════════════════════════════════════════════════════════════
-Write-Section "2b - Extracting CAB Diagnostic Intelligence"
+Write-Section "2c - Extracting CAB Diagnostic Intelligence"
 
 $cabIntel = [ordered]@{}
 
-$cabPath = Get-MpSupportCabPath -TimeoutSeconds 0
+$cabPath = if ($script:reportCabSnapshot) { $script:reportCabSnapshot.Path } else { $null }
 if ($cabPath -and (Test-Path -LiteralPath $cabPath)) {
     $cabExtractDir = Join-Path $env:TEMP "DefenderCAB_Intel_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
     New-Item -ItemType Directory -Path $cabExtractDir -Force | Out-Null
@@ -1733,12 +1901,13 @@ if ($cabPath -and (Test-Path -LiteralPath $cabPath)) {
                         }
 
                         $fieldName = ($Matches[1] -replace '\s+', '')
+                        $fieldValue = $Matches[2].Trim()
                         switch -Regex ($fieldName) {
-                            '^ProcessImageName$' { $currentImpactRecord['ProcessImageName'] = $Matches[2].Trim() }
-                            '^ProcessPath$'      { $currentImpactRecord['ProcessPath'] = $Matches[2].Trim() }
-                            '^ProcessName$'      { $currentImpactRecord['ProcessName'] = $Matches[2].Trim() }
-                            '^ImageName$'        { $currentImpactRecord['ImageName'] = $Matches[2].Trim() }
-                            '^EstimatedImpact$'  { $currentImpactRecord['EstimatedImpact'] = $Matches[2].Trim() }
+                            '^ProcessImageName$' { $currentImpactRecord['ProcessImageName'] = $fieldValue }
+                            '^ProcessPath$'      { $currentImpactRecord['ProcessPath'] = $fieldValue }
+                            '^ProcessName$'      { $currentImpactRecord['ProcessName'] = $fieldValue }
+                            '^ImageName$'        { $currentImpactRecord['ImageName'] = $fieldValue }
+                            '^EstimatedImpact$'  { $currentImpactRecord['EstimatedImpact'] = $fieldValue }
                         }
                     }
                 }
@@ -1928,11 +2097,11 @@ $workloadJob = $null
 if ($ValidateLoad) {
     $workloadScript = Join-Path (Split-Path $MyInvocation.MyCommand.Path -Parent) 'defender-workload.ps1'
     if (Test-Path $workloadScript) {
-        Write-Info "Launching workload generator in background..."
+        Write-Info "Launching workload generator in background (mode: $SyntheticWorkloadMode)..."
         $workloadJob = Start-Job -ScriptBlock {
-            param($script, $seconds)
-            & $script -DurationSeconds $seconds
-        } -ArgumentList $workloadScript, $RecordingSeconds
+            param($script, $seconds, $mode)
+            & $script -DurationSeconds $seconds -Mode $mode
+        } -ArgumentList $workloadScript, $RecordingSeconds, $SyntheticWorkloadMode
         Write-OK "Workload job started (Job ID: $($workloadJob.Id))"
     }
     else {
@@ -2055,6 +2224,7 @@ $jsonData = [ordered]@{
         SignatureVersion   = if ($status) { $status.AntivirusSignatureVersion } else { 'N/A' }
         RealTimeProtection = if ($status) { $status.RealTimeProtectionEnabled } else { $null }
         SyntheticWorkload  = [bool]$ValidateLoad
+        SyntheticWorkloadMode = if ($ValidateLoad) { $SyntheticWorkloadMode } else { $null }
         ExclusionValidation = $requestedValidateExclusions
         AIMode             = [bool]$AIMode
         AIExportFile       = $aiExportFile
@@ -2064,6 +2234,8 @@ $jsonData = [ordered]@{
         ScheduledStartAt   = if ($script:scheduledStartAt) { $script:scheduledStartAt.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
         ActualRunStartedAt = if ($script:actualRunStartedAt) { $script:actualRunStartedAt.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
         ScheduledWaitSeconds = $script:scheduledWaitSeconds
+        StrictCAB          = [bool]$StrictCAB
+        CABSnapshot        = $script:reportCabSnapshot
         ContextualExclusionsSupported = $contextualExclusionsSupported
         DisableLocalAdminMerge = $disableLocalAdminMerge
     }
@@ -2182,10 +2354,12 @@ if ($perfReport.TopExtensions) {
             }
 
             foreach ($scanContext in $script:topScanContexts) {
+                $hasExtensionComment = $false
                 foreach ($comment in @($scanContext.CommentSamples)) {
                     $parsedComment = Parse-ScanComment $comment
                     if (-not $parsedComment -or $parsedComment.Extension -ne $rawExtension) { continue }
 
+                    $hasExtensionComment = $true
                     $commentMatches++
                     Add-FolderAggregateObservation -Map $folderMap `
                         -FolderPath $parsedComment.FolderPath `
@@ -2193,6 +2367,18 @@ if ($perfReport.TopExtensions) {
                         -ProcessPath $scanContext.ProcessPath `
                         -Image $scanContext.ProcessImage `
                         -ExamplePath $parsedComment.Path
+                }
+
+                if (-not $hasExtensionComment -and $scanContext.TargetPath) {
+                    $scanContextExtension = Normalize-Extension ([System.IO.Path]::GetExtension([string]$scanContext.TargetPath))
+                    if ($scanContextExtension -eq $rawExtension) {
+                        Add-FolderAggregateObservation -Map $folderMap `
+                            -FolderPath (Get-PathDirectory ([string]$scanContext.TargetPath)) `
+                            -DurationMs ([double]$scanContext.DurationMs) `
+                            -ProcessPath $scanContext.ProcessPath `
+                            -Image $scanContext.ProcessImage `
+                            -ExamplePath ([string]$scanContext.TargetPath)
+                    }
                 }
             }
 
@@ -2383,6 +2569,7 @@ Write-Section "7 - Exclusion Suggestions"
 
 if ($ValidateLoad) {
     Write-Warn "Synthetic workload was enabled. Suggestions below may reflect the validation workload more than your normal usage."
+    Write-Info "Synthetic workload mode: $SyntheticWorkloadMode"
 }
 if ($contextualExclusionsSupported) {
     Write-Info "Contextual exclusions are supported. The script will prefer narrower process-plus-folder recommendations when scan data allows."
@@ -2420,6 +2607,9 @@ $dangerousProcesses = @(
     'mshta.exe', 'regsvr32.exe', 'rundll32.exe', 'msiexec.exe',
     'svchost.exe', 'explorer.exe', 'taskhostw.exe', 'conhost.exe',
     'dllhost.exe', 'wmic.exe', 'certutil.exe', 'bitsadmin.exe'
+)
+$validationOnlyProcesses = @(
+    'defender-workload-helper.exe'
 )
 $dangerousPathPrefixes = @(
     "$env:SystemRoot\System32",
@@ -2468,6 +2658,9 @@ function Get-ExtensionRisk([string]$ext) {
 $existingPathsLower = $discoveredExcl.Paths      | ForEach-Object { $_.ToLower() }
 $existingProcsLower = $discoveredExcl.Processes   | ForEach-Object { $_.ToLower() }
 $existingExtsLower = $discoveredExcl.Extensions  | ForEach-Object { Normalize-Extension $_ } | Where-Object { $_ }
+$totalTopScanMs = [double](@($perfReport.TopScans | ForEach-Object { Get-DurationMs $_ }) | Measure-Object -Sum).Sum
+$totalTopProcessMs = [double](@($perfReport.TopProcesses | ForEach-Object { Get-DurationMs $_ }) | Measure-Object -Sum).Sum
+$totalTopExtensionMs = [double](@($perfReport.TopExtensions | ForEach-Object { Get-DurationMs $_ }) | Measure-Object -Sum).Sum
 
 # ── Contextual path suggestions (preferred when supported) ───────────────────
 if ($contextualExclusionsSupported -and $perfReport.TopScans) {
@@ -2502,13 +2695,22 @@ if ($contextualExclusionsSupported -and $perfReport.TopScans) {
         if (-not $script:suggestedPaths.Add($target)) { continue }
 
         $contextualPath = Format-ContextualExclusionPath -path $target -pathType 'folder' -scanTrigger 'OnAccess' -processPath $procPath
+        $processFallback = New-RankedFallback -TierOrder 4 -Label 'Exact process fallback' -Command (Format-ExclusionProcessCommand -processPath $procPath)
+        $relativeShare = Get-RelativeSharePercent -durationMs $ms -totalMs $totalTopScanMs
         Add-Suggestion -Type "ContextualPath" -Value "$target <= $procName" `
             -Reason "On-access scans in this folder by $procName consumed $(Format-Duration $ms)" `
             -Impact (Get-ImpactLevel $ms) `
             -Command "Add-MpPreference -ExclusionPath '$($contextualPath -replace "'", "''")'" `
             -Risk 'CAUTION' `
-            -Advisory "Preferred over a broad folder or extension exclusion when the issue is tied to one trusted process. Protect the excluded folder with restrictive ACLs and only trust exact process paths. Based on Cloudbrothers and Microsoft contextual exclusion guidance." `
-            -Scope "MDAV on-access only for this folder and exact process path"
+            -Advisory "Start with this process-scoped folder exclusion before considering a broader process exclusion. Protect the excluded folder with restrictive ACLs and only trust exact process paths." `
+            -Scope "MDAV on-access only for this folder and exact process path" `
+            -Preference "Tier 2 - Contextual folder recommendation" `
+            -TierOrder 2 `
+            -Fallbacks @($processFallback) `
+            -RelatedProcessPath $procPath `
+            -RelativeSharePercent $relativeShare `
+            -RelativeShareBasis "of observed top-scan duration in this run"
+        [void]$script:coveredProcessPaths.Add($procPath)
     }
 }
 
@@ -2565,18 +2767,25 @@ if ($perfReport.TopProcesses) {
         $procName = Split-Path $procPath -Leaf -ErrorAction SilentlyContinue
         if (-not $procName) { $procName = $procPath }
 
+        if ($ValidateLoad -and ($validationOnlyProcesses -contains $procName.ToLowerInvariant())) { continue }
         if ($dangerousProcesses -contains $procName.ToLower()) { continue }
         if (-not (Test-SafeSuggestedProcessPath $procPath)) { continue }
         if ($existingProcsLower -and ($existingProcsLower -contains $procPath.ToLower())) { continue }
         if (-not $suggestedProcs.Add($procPath)) { continue }
+        $relativeShare = Get-RelativeSharePercent -durationMs $ms -totalMs $totalTopProcessMs
 
         Add-Suggestion -Type "Process" -Value $procPath `
             -Reason "Process consumed $(Format-Duration $ms) of scan time" `
             -Impact (Get-ImpactLevel $ms) `
-            -Command "Add-MpPreference -ExclusionProcess '$($procPath -replace "'", "''")'" `
+            -Command (Format-ExclusionProcessCommand -processPath $procPath) `
             -Risk 'CAUTION' `
-            -Advisory "Use exact process paths only. Files opened by this process are excluded from real-time scanning, but the process image itself is still scanned and scheduled or on-demand scans can still inspect those files." `
-            -Scope "MDAV real-time opened-file exclusion for this process"
+            -Advisory "Fallback only after narrower contextual or file-pattern options have been ruled out. Files opened by this process are excluded from real-time scanning, but the process image itself is still scanned and scheduled or on-demand scans can still inspect those files." `
+            -Scope "MDAV real-time opened-file exclusion for this process" `
+            -Preference "Tier 4 - Exact process fallback recommendation" `
+            -TierOrder 4 `
+            -RelatedProcessPath $procPath `
+            -RelativeSharePercent $relativeShare `
+            -RelativeShareBasis "of observed top-process scan duration in this run"
     }
 }
 
@@ -2630,12 +2839,19 @@ if ($perfReport.TopExtensions) {
         $reason = "Extension scans consumed $(Format-Duration $ms)"
         $scope = "MDAV broad extension exclusion across real-time, scheduled, and on-demand scans"
         $safeObservedPatternExamples = @($safeObservedFolders | ForEach-Object { Join-Path $_.FolderPath "*$extensionDisplay" })
+        $preference = ''
+        $tierOrder = 90
+        $fallbacks = @()
+        $contextualProcessPath = $null
+        $relatedProcessPath = $null
+        $relativeShare = Get-RelativeSharePercent -durationMs $ms -totalMs $totalTopExtensionMs
+        $concentrationPercent = $null
+        $concentrationBasis = ''
 
         if ($recommendedFolder) {
             $folderPath = $recommendedFolder.FolderPath
             $patternPath = Join-Path $folderPath "*$extensionDisplay"
             $shareText = if ($recommendedFolder.ShareOfObservedDuration) { "$($recommendedFolder.ShareOfObservedDuration)% of observed hotspot duration" } else { 'the heaviest observed hotspot activity' }
-            $contextualProcessPath = $null
             if ($recommendedFolder.TopProcessPath -and (Test-EligibleProcessPath $recommendedFolder.TopProcessPath) -and (Test-SafeSuggestedProcessPath $recommendedFolder.TopProcessPath)) {
                 $topProcessName = Split-Path $recommendedFolder.TopProcessPath -Leaf -ErrorAction SilentlyContinue
                 if ($topProcessName -and ($dangerousProcesses -notcontains $topProcessName.ToLowerInvariant())) {
@@ -2647,21 +2863,43 @@ if ($perfReport.TopExtensions) {
             $suggestionValue = "$extensionDisplay @ $folderPath"
             $reason = "The heaviest observed $extensionDisplay scans clustered in this folder ($shareText)"
             $scope = "Prefer file-pattern scoping for this extension hotspot; broader global extension exclusions remain a fallback"
+            $relatedProcessPath = $contextualProcessPath
+            $concentrationPercent = if ($recommendedFolder.ShareOfObservedDuration) { [double]$recommendedFolder.ShareOfObservedDuration } else { $null }
+            $concentrationBasis = 'of observed folder-attributed duration for this extension'
+            $processFallbackCommand = Format-ExclusionProcessCommand -processPath $contextualProcessPath
+            $contextualFolderFallbackCommand = if ($contextualProcessPath) {
+                "Add-MpPreference -ExclusionPath '$((Format-ContextualExclusionPath -path $folderPath -pathType 'folder' -scanTrigger 'OnAccess' -processPath $contextualProcessPath) -replace "'", "''")'"
+            } else { $null }
+            $patternFallbackCommand = "Add-MpPreference -ExclusionPath '$($patternPath -replace "'", "''")'"
 
             if ($contextualExclusionsSupported -and $contextualProcessPath) {
                 $contextualPattern = Format-ContextualExclusionPath -path $patternPath -pathType 'file' -scanTrigger 'OnAccess' -processPath $contextualProcessPath
                 $command = "Add-MpPreference -ExclusionPath '$($contextualPattern -replace "'", "''")'"
                 $scope = "MDAV on-access only for $extensionDisplay files in this folder and exact process path"
+                $preference = 'Tier 1 - Preferred contextual file-pattern recommendation'
+                $tierOrder = 1
+                $fallbacks = @(
+                    New-RankedFallback -TierOrder 2 -Label 'Contextual folder fallback' -Command $contextualFolderFallbackCommand
+                    New-RankedFallback -TierOrder 3 -Label 'File-pattern path fallback' -Command $patternFallbackCommand
+                    New-RankedFallback -TierOrder 4 -Label 'Exact process fallback' -Command $processFallbackCommand
+                )
+                [void]$script:coveredProcessPaths.Add($contextualProcessPath)
             }
             else {
-                $command = "Add-MpPreference -ExclusionPath '$($patternPath -replace "'", "''")'"
+                $command = $patternFallbackCommand
                 $scope = "MDAV file-pattern exclusion for $extensionDisplay files in this folder across scan types"
+                $preference = 'Tier 3 - Preferred file-pattern recommendation'
+                $tierOrder = 3
+                $fallbacks = @(
+                    New-RankedFallback -TierOrder 4 -Label 'Exact process fallback' -Command $processFallbackCommand
+                )
             }
             if ($risk -ne 'SAFE') {
                 $command += "`n     # Global fallback only if truly necessary: Add-MpPreference -ExclusionExtension '$extensionDisplay'"
+                $fallbacks += New-RankedFallback -TierOrder 6 -Label 'Global extension fallback only if truly necessary' -Command "Add-MpPreference -ExclusionExtension '$extensionDisplay'"
             }
 
-            $advisory = "Prefer this file-pattern exclusion here before considering a broader folder or global $extensionDisplay exclusion. Dominant observed process: $processText."
+            $advisory = "Start with the narrowest folder-scoped option here. Dominant observed process: $processText."
             $advisory += " Protect that folder with restrictive ACLs."
         }
         elseif ($safeObservedPatternExamples.Count -gt 0) {
@@ -2673,25 +2911,55 @@ if ($perfReport.TopExtensions) {
                     "Add-MpPreference -ExclusionPath '$($_ -replace "'", "''")'"
                 })
             $command = ($patternCommands -join "`n")
+            $preference = 'Tier 3 - Preferred file-pattern recommendation'
+            $tierOrder = 3
+            $concentrationPercent = if ($hotspot[0].DominantFolderShare) { [double]$hotspot[0].DominantFolderShare } else { $null }
+            $concentrationBasis = 'of observed folder-attributed duration for this extension'
             if ($risk -ne 'SAFE') {
                 $command += "`n     # Global fallback only if truly necessary: Add-MpPreference -ExclusionExtension '$extensionDisplay'"
+                $fallbacks += New-RankedFallback -TierOrder 6 -Label 'Global extension fallback only if truly necessary' -Command "Add-MpPreference -ExclusionExtension '$extensionDisplay'"
             }
             $advisory = "Prefer these concrete file-pattern exclusions over a global $extensionDisplay exclusion."
         }
         elseif ($hotspotIsSyntheticOnly) {
             $suppressedBecause = "Validation-only evidence: observed folders are synthetic workload paths and the dominant process is a Windows/system scripting engine, so this was not promoted into a live exclusion recommendation."
             $evidenceText = if ($hotspot[0].DominantProcessPath) { "Dominant process: $($hotspot[0].DominantProcessPath)" } else { "Dominant folder: $($hotspot[0].DominantFolderPath)" }
-            $suppressedCommands = @($allObservedPatternExamples | ForEach-Object {
-                    "Add-MpPreference -ExclusionPath '$($_ -replace "'", "''")'"
-                })
-            Add-SuppressedSuggestion -Type 'ValidationOnlyPattern' `
+            $suppressedCommands = @()
+            $suppressedType = 'ValidationOnlyPattern'
+            $suppressedScope = "Validation-only file-pattern candidates for $extensionDisplay"
+            $suppressedPreference = ''
+            if ($contextualExclusionsSupported -and $hotspot[0].DominantProcessPath -and (Test-EligibleProcessPath $hotspot[0].DominantProcessPath) -and (Test-SafeSuggestedProcessPath $hotspot[0].DominantProcessPath)) {
+                $suppressedCommands = @(
+                    $allObservedFolders |
+                    Select-Object -First 3 |
+                    ForEach-Object {
+                        $contextualSyntheticPattern = Format-ContextualExclusionPath -path (Join-Path $_.FolderPath "*$extensionDisplay") -pathType 'file' -scanTrigger 'OnAccess' -processPath $hotspot[0].DominantProcessPath
+                        "Add-MpPreference -ExclusionPath '$($contextualSyntheticPattern -replace "'", "''")'"
+                    }
+                )
+                $suppressedType = 'ValidationOnlyContextualPattern'
+                $suppressedScope = "Validation-only MDAV on-access contextual file-pattern candidates for $extensionDisplay and the exact helper process"
+                $suppressedPreference = 'Tier 1 - Validation-only preferred contextual file-pattern recommendation'
+                $suppressedBecause = "Validation-only evidence: this contextual file-pattern candidate came from the synthetic workload, so it was captured for proof but not promoted into a live recommendation."
+            }
+            else {
+                $suppressedCommands = @($allObservedPatternExamples | ForEach-Object {
+                        "Add-MpPreference -ExclusionPath '$($_ -replace "'", "''")'"
+                    })
+            }
+            Add-SuppressedSuggestion -Type $suppressedType `
                 -Value "$extensionDisplay @ synthetic workload folders" `
                 -Impact (Get-ImpactLevel $ms) `
                 -Reason "Observed $extensionDisplay scans clustered in synthetic validation folders" `
                 -SuppressedBecause $suppressedBecause `
                 -Commands $suppressedCommands `
-                -Scope "Validation-only file-pattern candidates for $extensionDisplay" `
-                -Evidence $evidenceText
+                -Scope $suppressedScope `
+                -Evidence $evidenceText `
+                -Preference $suppressedPreference `
+                -RelativeSharePercent $relativeShare `
+                -RelativeShareBasis "of observed extension scan duration in this run" `
+                -ConcentrationPercent $(if ($hotspot[0].DominantFolderShare) { [double]$hotspot[0].DominantFolderShare } else { $null }) `
+                -ConcentrationBasis "of observed folder-attributed duration for this extension"
             continue
         }
 
@@ -2721,24 +2989,63 @@ if ($perfReport.TopExtensions) {
             -Reason $reason `
             -Impact (Get-ImpactLevel $ms) `
             -Command $command -Risk $risk -Advisory $advisory `
-            -Scope $scope
+            -Scope $scope `
+            -Preference $preference `
+            -TierOrder $tierOrder `
+            -Fallbacks $fallbacks `
+            -RelatedProcessPath $relatedProcessPath `
+            -RelativeSharePercent $relativeShare `
+            -RelativeShareBasis "of observed extension scan duration in this run" `
+            -ConcentrationPercent $concentrationPercent `
+            -ConcentrationBasis $concentrationBasis
     }
+}
+
+if ($script:suggestions.Count -gt 0) {
+    foreach ($suggestion in @($script:suggestions)) {
+        if ($suggestion.Type -eq 'Process') { continue }
+        if ([string]::IsNullOrWhiteSpace([string]$suggestion.RelatedProcessPath)) { continue }
+
+        $processFallback = New-RankedFallback -TierOrder 4 -Label 'Exact process fallback' -Command (Format-ExclusionProcessCommand -processPath $suggestion.RelatedProcessPath)
+        if ([string]::IsNullOrWhiteSpace($processFallback)) { continue }
+
+        $existingFallbacks = @($suggestion.Fallbacks)
+        if ($existingFallbacks -notcontains $processFallback) {
+            $suggestion.Fallbacks = @($existingFallbacks + $processFallback | Select-Object -Unique)
+        }
+    }
+
+    $retainedSuggestions = [System.Collections.Generic.List[PSObject]]::new()
+    foreach ($suggestion in @($script:suggestions)) {
+        if ($suggestion.Type -eq 'Process' -and
+            -not [string]::IsNullOrWhiteSpace([string]$suggestion.RelatedProcessPath) -and
+            $script:coveredProcessPaths.Contains([string]$suggestion.RelatedProcessPath)) {
+            continue
+        }
+
+        $retainedSuggestions.Add($suggestion)
+    }
+
+    $script:suggestions = $retainedSuggestions
 }
 
 # ── Display suggestions ──────────────────────────────────────────────────────
 if ($script:suggestions.Count -eq 0) {
     if ($script:suppressedSuggestions.Count -gt 0) {
         Write-Info "No live exclusion recommendations were promoted from this run."
-        Write-Info "Validation-only folder-pattern candidates were captured for review below."
+        Write-Info "Validation-only exclusion candidates were captured for review below."
     }
     else {
         Write-OK "No significant exclusion candidates found -- Defender is performing well."
     }
 }
 else {
-    $sorted = $script:suggestions | Sort-Object {
-        switch ($_.Impact) { 'HIGH' { 0 } 'MEDIUM' { 1 } 'LOW' { 2 } }
-    }
+    $sorted = $script:suggestions | Sort-Object `
+        @{ Expression = { if ($_.TierOrder) { [int]$_.TierOrder } else { 99 } } }, `
+        @{ Expression = { Get-ImpactOrder $_.Impact } }, `
+        @{ Expression = { if ($null -ne $_.RelativeSharePercent) { -1 * [double]$_.RelativeSharePercent } else { 0 } } }, `
+        @{ Expression = { if ($null -ne $_.ConcentrationPercent) { -1 * [double]$_.ConcentrationPercent } else { 0 } } }, `
+        @{ Expression = { [string]$_.Value } }
 
     Write-Warn "$($script:suggestions.Count) exclusion suggestion(s) to improve performance:"
     Write-Host ""
@@ -2753,8 +3060,23 @@ else {
         if ($s.Scope) {
             Write-Host "     Scope  : $($s.Scope)" -ForegroundColor DarkGray
         }
+        if ($s.Preference) {
+            Write-Host "     Pref   : $($s.Preference)" -ForegroundColor Cyan
+        }
+        if ($null -ne $s.RelativeSharePercent) {
+            Write-Host "     Share  : $($s.RelativeSharePercent)% $($s.RelativeShareBasis)" -ForegroundColor DarkGray
+        }
+        if ($null -ne $s.ConcentrationPercent) {
+            Write-Host "     Focus  : $($s.ConcentrationPercent)% $($s.ConcentrationBasis)" -ForegroundColor DarkGray
+        }
         if ($s.Advisory) {
             Write-Host "     >> $($s.Advisory)" -ForegroundColor Yellow
+        }
+        if (@($s.Fallbacks).Count -gt 0) {
+            Write-Host "     Fallback: $($s.Fallbacks[0])" -ForegroundColor DarkYellow
+            foreach ($fallback in (@($s.Fallbacks) | Select-Object -Skip 1)) {
+                Write-Host "               $fallback" -ForegroundColor DarkYellow
+            }
         }
         Write-Host "     Run    : $($s.Command)" -ForegroundColor DarkCyan
         Write-Host ""
@@ -2785,11 +3107,26 @@ if ($script:suppressedSuggestions.Count -gt 0) {
         if ($s.Scope) {
             Write-Host "     Scope     : $($s.Scope)" -ForegroundColor DarkGray
         }
+        if ($s.Preference) {
+            Write-Host "     Pref      : $($s.Preference)" -ForegroundColor Cyan
+        }
+        if ($null -ne $s.RelativeSharePercent) {
+            Write-Host "     Share     : $($s.RelativeSharePercent)% $($s.RelativeShareBasis)" -ForegroundColor DarkGray
+        }
+        if ($null -ne $s.ConcentrationPercent) {
+            Write-Host "     Focus     : $($s.ConcentrationPercent)% $($s.ConcentrationBasis)" -ForegroundColor DarkGray
+        }
         if ($s.Evidence) {
             Write-Host "     Evidence  : $($s.Evidence)" -ForegroundColor DarkGray
         }
         if ($s.SuppressedBecause) {
             Write-Host "     Suppressed: $($s.SuppressedBecause)" -ForegroundColor Yellow
+        }
+        if (@($s.Fallbacks).Count -gt 0) {
+            Write-Host "     Fallbacks : $($s.Fallbacks[0])" -ForegroundColor DarkYellow
+            foreach ($fallback in (@($s.Fallbacks) | Select-Object -Skip 1)) {
+                Write-Host "                 $fallback" -ForegroundColor DarkYellow
+            }
         }
 
         $commands = @($s.Commands)
@@ -2848,7 +3185,10 @@ $jsonData['ExclusionSuggestions'] = @($script:suggestions | ForEach-Object {
         [ordered]@{
             Type = $_.Type; Value = $_.Value; Reason = $_.Reason
             Impact = $_.Impact; Command = $_.Command
-            Risk = $_.Risk; Advisory = $_.Advisory; Scope = $_.Scope
+            Risk = $_.Risk; Advisory = $_.Advisory; Scope = $_.Scope; Preference = $_.Preference
+            TierOrder = $_.TierOrder; Fallbacks = @($_.Fallbacks)
+            RelativeSharePercent = $_.RelativeSharePercent; RelativeShareBasis = $_.RelativeShareBasis
+            ConcentrationPercent = $_.ConcentrationPercent; ConcentrationBasis = $_.ConcentrationBasis
         }
     })
 $jsonData['SuppressedCandidates'] = @($script:suppressedSuggestions | ForEach-Object {
@@ -2861,6 +3201,12 @@ $jsonData['SuppressedCandidates'] = @($script:suppressedSuggestions | ForEach-Ob
             Commands          = @($_.Commands)
             Scope             = $_.Scope
             Evidence          = $_.Evidence
+            Preference        = $_.Preference
+            Fallbacks         = @($_.Fallbacks)
+            RelativeSharePercent = $_.RelativeSharePercent
+            RelativeShareBasis   = $_.RelativeShareBasis
+            ConcentrationPercent = $_.ConcentrationPercent
+            ConcentrationBasis   = $_.ConcentrationBasis
         }
     })
 $jsonData['ExtensionHotspots'] = @($script:extensionHotspots)
@@ -3031,12 +3377,23 @@ $htmlImpactRows = ($script:impactTableRows | Sort-Object DurationMs -Descending 
     }) -join "`n"
 
 $htmlSuggestionRows = if ($script:suggestions.Count -gt 0) {
-    ($script:suggestions | Sort-Object { switch ($_.Impact) { 'HIGH' { 0 }'MEDIUM' { 1 }'LOW' { 2 } } } | ForEach-Object {
+    ($script:suggestions | Sort-Object `
+        @{ Expression = { if ($_.TierOrder) { [int]$_.TierOrder } else { 99 } } }, `
+        @{ Expression = { Get-ImpactOrder $_.Impact } }, `
+        @{ Expression = { if ($null -ne $_.RelativeSharePercent) { -1 * [double]$_.RelativeSharePercent } else { 0 } } }, `
+        @{ Expression = { if ($null -ne $_.ConcentrationPercent) { -1 * [double]$_.ConcentrationPercent } else { 0 } } }, `
+        @{ Expression = { [string]$_.Value } } | ForEach-Object {
         $c = switch ($_.Impact) { 'HIGH' { '#ef4444' } 'MEDIUM' { '#f59e0b' } default { '#22c55e' } }
         $rc = switch ($_.Risk) { 'CAUTION' { '#f59e0b' } 'UNKNOWN' { '#94a3b8' } default { '#22c55e' } }
         $scopeHtml = if ($_.Scope) { "<br><small style='color:#94a3b8'>$(HtmlEncode $_.Scope)</small>" } else { '' }
+        $preferenceHtml = if ($_.Preference) { "<br><small style='color:#38bdf8;font-weight:bold'>$(HtmlEncode $_.Preference)</small>" } else { '' }
+        $shareHtml = if ($null -ne $_.RelativeSharePercent) { "<br><small style='color:#cbd5e1'>Share: $(HtmlEncode ([string]$_.RelativeSharePercent))% $(HtmlEncode $_.RelativeShareBasis)</small>" } else { '' }
+        $focusHtml = if ($null -ne $_.ConcentrationPercent) { "<br><small style='color:#cbd5e1'>Focus: $(HtmlEncode ([string]$_.ConcentrationPercent))% $(HtmlEncode $_.ConcentrationBasis)</small>" } else { '' }
         $advisoryHtml = if ($_.Advisory) { "<br><small style='color:#fbbf24'>$(HtmlEncode $_.Advisory)</small>" } else { '' }
-        "<tr><td style='color:$c;font-weight:bold'>$($_.Impact)</td><td style='color:$rc'>$(HtmlEncode $_.Risk)</td><td>$(HtmlEncode $_.Type)</td><td>$(HtmlEncode $_.Value)</td><td>$(HtmlEncode $_.Reason)$scopeHtml$advisoryHtml</td><td><code>$(HtmlEncode $_.Command)</code></td></tr>"
+        $fallbackHtml = if (@($_.Fallbacks).Count -gt 0) {
+            "<br><small style='color:#facc15'>Fallbacks:</small><br>" + ((@($_.Fallbacks) | ForEach-Object { "<small style='color:#fde68a'>$(HtmlEncode $_)</small>" }) -join '<br>')
+        } else { '' }
+        "<tr><td style='color:$c;font-weight:bold'>$($_.Impact)</td><td style='color:$rc'>$(HtmlEncode $_.Risk)</td><td>$(HtmlEncode $_.Type)</td><td>$(HtmlEncode $_.Value)</td><td>$(HtmlEncode $_.Reason)$scopeHtml$preferenceHtml$shareHtml$focusHtml$advisoryHtml$fallbackHtml</td><td><code>$(HtmlEncode $_.Command)</code></td></tr>"
     }) -join "`n"
 }
 else {
@@ -3047,15 +3404,21 @@ $htmlSuppressedRows = if ($script:suppressedSuggestions.Count -gt 0) {
     ($script:suppressedSuggestions | Sort-Object { switch ($_.Impact) { 'HIGH' { 0 } 'MEDIUM' { 1 } 'LOW' { 2 } default { 3 } } } | ForEach-Object {
         $c = switch ($_.Impact) { 'HIGH' { '#ef4444' } 'MEDIUM' { '#f59e0b' } default { '#22c55e' } }
         $scopeHtml = if ($_.Scope) { "<br><small style='color:#94a3b8'>$(HtmlEncode $_.Scope)</small>" } else { '' }
+        $preferenceHtml = if ($_.Preference) { "<br><small style='color:#38bdf8;font-weight:bold'>$(HtmlEncode $_.Preference)</small>" } else { '' }
+        $shareHtml = if ($null -ne $_.RelativeSharePercent) { "<br><small style='color:#cbd5e1'>Share: $(HtmlEncode ([string]$_.RelativeSharePercent))% $(HtmlEncode $_.RelativeShareBasis)</small>" } else { '' }
+        $focusHtml = if ($null -ne $_.ConcentrationPercent) { "<br><small style='color:#cbd5e1'>Focus: $(HtmlEncode ([string]$_.ConcentrationPercent))% $(HtmlEncode $_.ConcentrationBasis)</small>" } else { '' }
         $evidenceHtml = if ($_.Evidence) { "<br><small style='color:#94a3b8'>Evidence: $(HtmlEncode $_.Evidence)</small>" } else { '' }
         $suppressedHtml = if ($_.SuppressedBecause) { "<br><small style='color:#fbbf24'>$(HtmlEncode $_.SuppressedBecause)</small>" } else { '' }
+        $fallbackHtml = if (@($_.Fallbacks).Count -gt 0) {
+            "<br><small style='color:#facc15'>Fallbacks:</small><br>" + ((@($_.Fallbacks) | ForEach-Object { "<small style='color:#fde68a'>$(HtmlEncode $_)</small>" }) -join '<br>')
+        } else { '' }
         $commandHtml = if (@($_.Commands).Count -gt 0) {
             (@($_.Commands) | ForEach-Object { "<code>$(HtmlEncode $_)</code>" }) -join '<br>'
         }
         else {
             "<span style='color:#94a3b8'>No candidate commands recorded</span>"
         }
-        "<tr><td style='color:$c;font-weight:bold'>$(HtmlEncode $_.Impact)</td><td>$(HtmlEncode $_.Type)</td><td>$(HtmlEncode $_.Value)</td><td>$(HtmlEncode $_.Reason)$scopeHtml$evidenceHtml$suppressedHtml</td><td style='white-space:normal;word-break:break-word;vertical-align:top'>$commandHtml</td></tr>"
+        "<tr><td style='color:$c;font-weight:bold'>$(HtmlEncode $_.Impact)</td><td>$(HtmlEncode $_.Type)</td><td>$(HtmlEncode $_.Value)</td><td>$(HtmlEncode $_.Reason)$scopeHtml$preferenceHtml$shareHtml$focusHtml$evidenceHtml$suppressedHtml$fallbackHtml</td><td style='white-space:normal;word-break:break-word;vertical-align:top'>$commandHtml</td></tr>"
     }) -join "`n"
 }
 else {

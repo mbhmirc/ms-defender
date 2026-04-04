@@ -1,5 +1,7 @@
 DefenderPerf_*.json
 DefenderPerf_*.html
+DefenderPerfCompare_*.json
+DefenderPerfCompare_*.html
 DefenderPerf_*.ai-export.json
 DefenderPerf_*.ai-prompt.md
 DefenderPerf_*.transcript.log
@@ -16,3 +18,5 @@ single_run_ai_mode_*/
 validation_direct_*/
 validation_hotspots_*/
 validation_loop_*/
+tests/results/
+CSC*.TMP

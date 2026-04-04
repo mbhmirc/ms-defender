@@ -21,7 +21,12 @@ param(
 
     [string]$StartAtTime,
 
+    [switch]$StrictCAB,
+
     [switch]$ValidateLoad,
+
+    [ValidateSet('Mixed', 'PowerShell', 'NativeExe')]
+    [string]$SyntheticWorkloadMode = 'Mixed',
 
     [switch]$ValidateExclusions,
 
@@ -58,7 +63,7 @@ function Test-IsAdministrator {
 
 function Resolve-ScheduledStart {
     param(
-        [datetime]$ExplicitStart,
+        [Nullable[datetime]]$ExplicitStart,
         [string]$TimeOfDay,
         [bool]$ExplicitStartSpecified,
         [bool]$TimeOfDaySpecified
@@ -158,6 +163,11 @@ if (-not (Test-IsAdministrator)) {
 
     if ($ValidateLoad) {
         $argList += '-ValidateLoad'
+        $argList += '-SyntheticWorkloadMode'
+        $argList += $SyntheticWorkloadMode
+    }
+    if ($StrictCAB) {
+        $argList += '-StrictCAB'
     }
     if ($ValidateExclusions) {
         $argList += '-ValidateExclusions'
@@ -194,7 +204,7 @@ Write-Stage -Stage 'START' -Message "Output root: $OutputRoot"
 if ($scheduleRequest) {
     Write-Stage -Stage 'SCHEDULE' -Message ("Passing scheduled start {0} into defender.ps1" -f $scheduleRequest.StartAt.ToString('yyyy-MM-dd HH:mm:ss'))
 }
-Write-Stage -Stage 'RUN' -Message "Launching defender.ps1 for ${RecordingSeconds}s"
+    Write-Stage -Stage 'RUN' -Message "Launching defender.ps1 for ${RecordingSeconds}s"
 
 $scriptError = $null
 $exitCode = 0
@@ -209,9 +219,13 @@ try {
     if ($scheduleRequest) {
         $defenderParams['StartAt'] = $scheduleRequest.StartAt
     }
+    if ($StrictCAB) {
+        $defenderParams['StrictCAB'] = $true
+    }
 
     if ($ValidateLoad) {
         $defenderParams['ValidateLoad'] = $true
+        $defenderParams['SyntheticWorkloadMode'] = $SyntheticWorkloadMode
     }
     if ($ValidateExclusions) {
         $defenderParams['ValidateExclusions'] = $true
@@ -241,7 +255,9 @@ $result = [ordered]@{
     ScheduleMode        = if ($scheduleRequest) { $scheduleRequest.Mode } else { 'Immediate' }
     ScheduleInput       = if ($scheduleRequest) { $scheduleRequest.InputText } else { $null }
     ScheduledStartAt    = if ($scheduleRequest) { $scheduleRequest.StartAt.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
+    StrictCAB           = [bool]$StrictCAB
     ValidateLoad        = [bool]$ValidateLoad
+    SyntheticWorkloadMode = if ($ValidateLoad) { $SyntheticWorkloadMode } else { $null }
     ValidateExclusions  = [bool]$ValidateExclusions
     AIMode              = [bool]$AIMode
     ExitCode            = $exitCode

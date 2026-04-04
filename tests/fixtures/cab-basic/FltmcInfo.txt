@@ -1,0 +1,3 @@
+Filter Name                     Num Instances    Altitude    Frame
+WdFilter                        5                328010      0
+bindflt                         1                409800      0

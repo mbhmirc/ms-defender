@@ -1,0 +1,5 @@
+Defender service running mode: Normal
+PackageVersion: 1.0.0.0
+State: Disabled
+DefaultEnforcement: Deny
+PoliciesLastUpdated: 2026-04-01 12:00:00

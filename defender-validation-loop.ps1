@@ -28,6 +28,11 @@ param(
 
     [string]$StartAtTime,
 
+    [switch]$StrictCAB,
+
+    [ValidateSet('Mixed', 'PowerShell', 'NativeExe')]
+    [string]$SyntheticWorkloadMode = 'Mixed',
+
     [switch]$StopOnFailure
 )
 
@@ -74,7 +79,7 @@ function Test-IsAdministrator {
 
 function Resolve-ScheduledStart {
     param(
-        [datetime]$ExplicitStart,
+        [Nullable[datetime]]$ExplicitStart,
         [string]$TimeOfDay,
         [bool]$ExplicitStartSpecified,
         [bool]$TimeOfDaySpecified
@@ -209,12 +214,17 @@ if (-not (Test-IsAdministrator)) {
         $WaitMinutes
         '-OutputRoot'
         ('"{0}"' -f $OutputRoot)
+        '-SyntheticWorkloadMode'
+        $SyntheticWorkloadMode
     )
 
     if ($scheduleRequest) {
         Write-Stage -Stage 'SCHEDULE' -Message ("Scheduled first cycle resolved to {0}" -f $scheduleRequest.StartAt.ToString('yyyy-MM-dd HH:mm:ss'))
         $argList += '-StartAt'
         $argList += ('"{0}"' -f $scheduleRequest.StartAt.ToString('o'))
+    }
+    if ($StrictCAB) {
+        $argList += '-StrictCAB'
     }
 
     if ($StopOnFailure) {
@@ -243,6 +253,8 @@ $settings = [ordered]@{
     ScheduleInput    = if ($scheduleRequest) { $scheduleRequest.InputText } else { $null }
     ScheduledStartAt = if ($scheduleRequest) { $scheduleRequest.StartAt.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
     ScheduledWaitSeconds = $scheduledWaitSeconds
+    StrictCAB        = [bool]$StrictCAB
+    SyntheticWorkloadMode = $SyntheticWorkloadMode
     OutputRoot       = $OutputRoot
     StopOnFailure    = [bool]$StopOnFailure
 }
@@ -281,9 +293,15 @@ for ($iteration = 1; $iteration -le $Iterations; $iteration++) {
             $TopN
             '-OutputRoot'
             $cycleDir
+            '-SyntheticWorkloadMode'
+            $SyntheticWorkloadMode
             '-NoAutoClose'
             '-NoOpenReport'
         )
+
+        if ($StrictCAB) {
+            $testArgs += '-StrictCAB'
+        }
 
         & powershell.exe @testArgs
         $exitCode = $LASTEXITCODE

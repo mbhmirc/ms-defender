@@ -1,0 +1,6 @@
+displayName = [Windows Defender]
+pathToSignedProductExe = [C:\Program Files\Windows Defender\MsMpEng.exe]
+productState = [397568]
+displayName = [Contoso AV]
+pathToSignedProductExe = [D:\ContosoAV\contosoav.exe]
+productState = [393216]
