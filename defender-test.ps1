@@ -158,8 +158,9 @@ if ($defenderSource) {
     if ($safeBlockMatch.Success -and $cautionBlockMatch.Success) {
         $safeBlock = $safeBlockMatch.Groups[1].Value
         $cautionBlock = $cautionBlockMatch.Groups[1].Value
-        $forbiddenSafe = @('py', 'java', 'jar') | Where-Object { $safeBlock -match "'$_'" }
-        $missingCaution = @('py', 'java', 'jar') | Where-Object { $cautionBlock -notmatch "'$_'" }
+        # py/java are intentionally SAFE (source code); jar stays CAUTION (executable archive)
+        $forbiddenSafe = @('jar') | Where-Object { $safeBlock -match "'$_'" }
+        $missingCaution = @('jar') | Where-Object { $cautionBlock -notmatch "'$_'" }
         Add-Test "Extension tier guardrails" $(if ($forbiddenSafe.Count -eq 0 -and $missingCaution.Count -eq 0) { "PASS" } else { "FAIL" }) $(if ($forbiddenSafe.Count -eq 0 -and $missingCaution.Count -eq 0) { "" } else { "Safe overlap: $($forbiddenSafe -join ', ') Missing caution: $($missingCaution -join ', ')" })
     }
     else {
@@ -419,7 +420,7 @@ if ($jsonContent -and $jsonContent.ExclusionSuggestions) {
 }
 
 # ── Test 7b: Scan context and extension hotspot models ─────────────────────
-if ($jsonContent -and $jsonContent.TopScanContexts) {
+if ($jsonContent -and $jsonContent.PSObject.Properties['TopScanContexts']) {
     $scanContexts = @($jsonContent.TopScanContexts)
     Add-Test "Top scan contexts generated" $(if ($scanContexts.Count -gt 0) { "PASS" } else { "WARN" }) "$($scanContexts.Count) context rows"
 
@@ -456,7 +457,8 @@ if ($jsonContent -and $jsonContent.PSObject.Properties['SuppressedCandidates']) 
         $missingSuppressedCommands = @($suppressedCandidates | Where-Object { @($_.Commands).Count -eq 0 })
         Add-Test "Suppressed candidates include commands" $(if ($missingSuppressedCommands.Count -eq 0) { "PASS" } else { "FAIL" }) "$($missingSuppressedCommands.Count) missing command set(s)"
 
-        $invalidSuppressedPatterns = @($suppressedCandidates | Where-Object {
+        $filePatternSuppressed = @($suppressedCandidates | Where-Object { $_.Type -ne 'ValidationOnlyProcess' })
+        $invalidSuppressedPatterns = @($filePatternSuppressed | Where-Object {
                 @($_.Commands | Where-Object {
                         $_ -notmatch '-ExclusionPath' -or
                         $_ -notmatch '\\\*\.[^''"\r\n]+'
@@ -487,6 +489,13 @@ if ($jsonContent -and $jsonContent.PSObject.Properties['SuppressedCandidates']) 
     }
     elseif ($ValidateLoad) {
         Add-Test "Suppressed candidates captured during validation load" "WARN" "No suppressed candidates recorded"
+    }
+
+    if ($SyntheticWorkloadMode -eq 'NativeExe') {
+        $suppressedProcessCandidates = @($suppressedCandidates | Where-Object {
+                $_.Type -eq 'ValidationOnlyProcess' -and $_.Value -match 'defender-workload-helper\.exe$'
+            })
+        Add-Test "NativeExe: workload helper captured as suppressed process" $(if ($suppressedProcessCandidates.Count -gt 0) { "PASS" } else { "FAIL" }) "$($suppressedProcessCandidates.Count) suppressed process candidate(s)"
     }
 }
 else {

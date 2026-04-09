@@ -298,10 +298,10 @@ function Get-DefenderRiskCatalog {
             'pdf', 'rtf', 'html', 'htm', 'xml', 'svg', 'zip', 'rar', '7z', 'cab',
             'iso', 'img', 'vhd', 'vhdx', 'tar', 'gz', 'bz2', 'jar',
             'txt', 'csv', 'json', 'yaml', 'yml', 'ini', 'cfg', 'conf', 'log',
-            'tmp', 'bak', 'dat', 'bin', 'db', 'cache', 'py', 'java'
+            'tmp', 'bak', 'dat', 'bin', 'db', 'cache'
         )
         SafeExtensions = @(
-            'pyc', 'pyo', 'rb', 'go', 'rs', 'class',
+            'py', 'pyc', 'pyo', 'java', 'rb', 'go', 'rs', 'class',
             'cs', 'cpp', 'c', 'h', 'hpp', 'ts', 'tsx', 'jsx', 'vue', 'svelte',
             'css', 'scss', 'less', 'sass', 'md', 'rst', 'lock', 'sum',
             'o', 'obj', 'lib', 'a', 'so', 'pdb', 'idb', 'map',
@@ -600,7 +600,24 @@ function Get-DefenderRecommendationResult {
 
             $procName = Split-Path $procPath -Leaf -ErrorAction SilentlyContinue
             if (-not $procName) { $procName = $procPath }
-            if ($ValidateLoad -and ($riskCatalog.ValidationOnlyProcesses -contains $procName.ToLowerInvariant())) { continue }
+            if ($ValidateLoad -and ($riskCatalog.ValidationOnlyProcesses -contains $procName.ToLowerInvariant())) {
+                $relSharePct = Get-RelativeSharePercent -DurationMs $ms -TotalMs $totalTopProcessMs
+                $suppressedCandidates.Add([PSCustomObject]@{
+                    Type              = 'ValidationOnlyProcess'
+                    Value             = $procPath
+                    Impact            = Get-ImpactLevel -DurationMs $ms -HighThresholdMs $HighThresholdMs -MediumThresholdMs $MediumThresholdMs
+                    Reason            = "Process consumed $(Format-Duration $ms) of scan time"
+                    SuppressedBecause = 'Validation-only evidence: this process is the synthetic workload helper. Captured as proof that native-exe scan load was observed, but not promoted into a live recommendation.'
+                    Commands          = @(Format-ExclusionProcessCommand -ProcessPath $procPath)
+                    Scope             = 'MDAV real-time opened-file exclusion for this process'
+                    Preference        = 'Tier 4 - Validation-only process observation'
+                    RelativeSharePercent  = $relSharePct
+                    RelativeShareBasis    = 'of observed top-process scan duration in this run'
+                    ConcentrationPercent  = $null
+                    ConcentrationBasis    = $null
+                })
+                continue
+            }
             if ($riskCatalog.DangerousProcesses -contains $procName.ToLowerInvariant()) { continue }
             if (-not (Test-SafeSuggestedProcessPath -Path $procPath -SystemProcessPathPrefixes $riskCatalog.SystemProcessPathPrefixes)) { continue }
             if ($existingProcsLower -contains $procPath.ToLowerInvariant()) { continue }
