@@ -18,13 +18,64 @@ foreach ($scriptPath in $script:EntryScripts.Values) {
 
 . $script:EntryScripts.ReportLib
 
+function Get-MsDefenderHostExecutable {
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        return 'powershell.exe'
+    }
+
+    return 'pwsh.exe'
+}
+
+function ConvertTo-MsDefenderScriptArguments {
+    param(
+        [Parameter(Mandatory)][hashtable]$Parameters
+    )
+
+    $argumentList = New-Object System.Collections.Generic.List[string]
+
+    foreach ($entry in $Parameters.GetEnumerator() | Sort-Object Key) {
+        $name = $entry.Key
+        $value = $entry.Value
+
+        if ($null -eq $value) {
+            continue
+        }
+
+        if ($value -is [System.Management.Automation.SwitchParameter]) {
+            if ($value.IsPresent) {
+                [void]$argumentList.Add("-$name")
+            }
+            continue
+        }
+
+        if ($value -is [datetime]) {
+            [void]$argumentList.Add("-$name")
+            [void]$argumentList.Add($value.ToString('o'))
+            continue
+        }
+
+        [void]$argumentList.Add("-$name")
+        [void]$argumentList.Add([string]$value)
+    }
+
+    return $argumentList.ToArray()
+}
+
 function Invoke-MsDefenderScript {
     param(
         [Parameter(Mandatory)][string]$ScriptPath,
         [Parameter()][hashtable]$Parameters = @{}
     )
 
-    & $ScriptPath @Parameters
+    $hostExecutable = Get-MsDefenderHostExecutable
+    $scriptArguments = ConvertTo-MsDefenderScriptArguments -Parameters $Parameters
+
+    & $hostExecutable '-NoProfile' '-ExecutionPolicy' 'Bypass' '-File' $ScriptPath @scriptArguments
+    $exitCode = $LASTEXITCODE
+
+    if ($exitCode -ne 0) {
+        throw ("MSDefender entry script failed with exit code {0}: {1}" -f $exitCode, $ScriptPath)
+    }
 }
 
 function Invoke-MsDefenderPerformanceAudit {

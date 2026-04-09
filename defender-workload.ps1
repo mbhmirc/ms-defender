@@ -101,26 +101,47 @@ function Get-WorkloadHelperExecutable {
     $sourcePath = Join-Path $scriptDir 'defender-workload-helper.cs'
     $exePath = Join-Path $scriptDir 'defender-workload-helper.exe'
 
-    if (-not (Test-Path -LiteralPath $sourcePath)) {
+    $hasExe = Test-Path -LiteralPath $exePath
+    $hasSource = Test-Path -LiteralPath $sourcePath
+
+    if ($hasExe -and -not $hasSource) {
+        return $exePath
+    }
+
+    if (-not $hasSource) {
         Write-Host "[workload] Native helper source not found, falling back to PowerShell child workload" -ForegroundColor Yellow
         return $null
     }
 
-    $compiler = Get-CSharpCompilerPath
-    if (-not $compiler) {
-        Write-Host "[workload] csc.exe not found, falling back to PowerShell child workload" -ForegroundColor Yellow
-        return $null
-    }
-
-    $needsBuild = -not (Test-Path -LiteralPath $exePath)
+    $needsBuild = -not $hasExe
     if (-not $needsBuild) {
         $needsBuild = (Get-Item -LiteralPath $sourcePath).LastWriteTimeUtc -gt (Get-Item -LiteralPath $exePath).LastWriteTimeUtc
+    }
+
+    if (-not $needsBuild) {
+        return $exePath
+    }
+
+    $compiler = Get-CSharpCompilerPath
+    if (-not $compiler) {
+        if ($hasExe) {
+            Write-Host "[workload] csc.exe not found; using existing native workload helper" -ForegroundColor Yellow
+            return $exePath
+        }
+
+        Write-Host "[workload] csc.exe not found, falling back to PowerShell child workload" -ForegroundColor Yellow
+        return $null
     }
 
     if ($needsBuild) {
         Write-Host "[workload] Building native workload helper..." -ForegroundColor DarkGray
         & $compiler '/nologo' '/target:exe' '/optimize+' "/out:$exePath" $sourcePath | Out-Null
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $exePath)) {
+            if ($hasExe) {
+                Write-Host "[workload] Failed to rebuild native workload helper, using existing helper executable" -ForegroundColor Yellow
+                return $exePath
+            }
+
             Write-Host "[workload] Failed to build native workload helper, falling back to PowerShell child workload" -ForegroundColor Yellow
             return $null
         }
@@ -322,5 +343,28 @@ Write-Host "[workload]   Elapsed                : $([math]::Round($stopwatch.Ela
 
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 Write-Host "[workload] Cleaning up workload files..." -ForegroundColor DarkGray
-Remove-Item -Path $WorkDir -Recurse -Force -ErrorAction SilentlyContinue
-Write-Host "[workload] Cleanup complete" -ForegroundColor Magenta
+
+$cleanupError = $null
+for ($attempt = 1; $attempt -le 5; $attempt++) {
+    if (-not (Test-Path -LiteralPath $WorkDir)) {
+        break
+    }
+
+    try {
+        Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction Stop
+    }
+    catch {
+        $cleanupError = $_
+        Start-Sleep -Milliseconds (200 * $attempt)
+    }
+}
+
+if (Test-Path -LiteralPath $WorkDir) {
+    Write-Host "[workload] Cleanup incomplete - workload files remain at $WorkDir" -ForegroundColor Yellow
+    if ($cleanupError) {
+        Write-Host "[workload] Cleanup error: $($cleanupError.Exception.Message)" -ForegroundColor DarkGray
+    }
+}
+else {
+    Write-Host "[workload] Cleanup complete" -ForegroundColor Magenta
+}

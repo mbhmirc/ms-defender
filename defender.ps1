@@ -2589,13 +2589,13 @@ $cautionExtensions = @(
     'pdf', 'rtf', 'html', 'htm', 'xml', 'svg', 'zip', 'rar', '7z', 'cab',
     'iso', 'img', 'vhd', 'vhdx', 'tar', 'gz', 'bz2', 'jar',
     'txt', 'csv', 'json', 'yaml', 'yml', 'ini', 'cfg', 'conf', 'log',
-    'tmp', 'bak', 'dat', 'bin', 'db', 'cache', 'py', 'java'
+    'tmp', 'bak', 'dat', 'bin', 'db', 'cache'
 )
 
 # SAFE for global exclusion: development/build artefacts unlikely to carry threats
 # (Still shown with advisory, but no path-scoping required)
 $safeExtensions = @(
-    'pyc', 'pyo', 'rb', 'go', 'rs', 'class',
+    'py', 'pyc', 'pyo', 'java', 'rb', 'go', 'rs', 'class',
     'cs', 'cpp', 'c', 'h', 'hpp', 'ts', 'tsx', 'jsx', 'vue', 'svelte',
     'css', 'scss', 'less', 'sass', 'md', 'rst', 'lock', 'sum',
     'o', 'obj', 'lib', 'a', 'so', 'pdb', 'idb', 'map',

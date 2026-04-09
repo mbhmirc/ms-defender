@@ -543,6 +543,18 @@ Depending on the run mode and available diagnostics, the generated report can in
 - Treat synthetic workload results as validation data, not production recommendations.
 - Protect excluded folders with restrictive NTFS ACLs.
 
+## Review Subagents
+
+Reusable review briefs live in [subagents](./subagents/README.md).
+
+They provide a structured improvement workflow for:
+
+- code audit
+- latest-guidance validation
+- documentation validation
+- testing and validation review
+- next-step idea generation
+
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](./LICENSE).

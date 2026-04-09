@@ -77,6 +77,29 @@ function Test-IsAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Get-PowerShellHostExecutable {
+    $currentProcess = Get-Process -Id $PID -ErrorAction SilentlyContinue
+    if ($currentProcess -and $currentProcess.Path) {
+        return $currentProcess.Path
+    }
+
+    $candidate = Join-Path $PSHOME 'powershell.exe'
+    if (Test-Path -LiteralPath $candidate) {
+        return $candidate
+    }
+
+    return 'powershell.exe'
+}
+
+function Get-SafeElevationWorkingDirectory {
+    $systemDirectory = Join-Path $env:SystemRoot 'System32'
+    if (Test-Path -LiteralPath $systemDirectory -PathType Container) {
+        return $systemDirectory
+    }
+
+    return (Get-Location).Path
+}
+
 function Resolve-ScheduledStart {
     param(
         [Nullable[datetime]]$ExplicitStart,
@@ -197,6 +220,8 @@ if (-not (Test-Path $testHarness)) {
 
 if (-not (Test-IsAdministrator)) {
     Write-Stage -Stage 'ELEVATE' -Message 'Requesting administrator approval via UAC...'
+    $hostExecutable = Get-PowerShellHostExecutable
+    $workingDirectory = Get-SafeElevationWorkingDirectory
 
     $argList = @(
         '-NoProfile'
@@ -232,7 +257,7 @@ if (-not (Test-IsAdministrator)) {
     }
 
     try {
-        Start-Process -FilePath 'powershell.exe' -Verb RunAs -WorkingDirectory $scriptDir -ArgumentList $argList | Out-Null
+        Start-Process -FilePath $hostExecutable -Verb RunAs -WorkingDirectory $workingDirectory -ArgumentList $argList | Out-Null
         Write-Stage -Stage 'ELEVATE' -Message 'Elevated loop started in a new PowerShell window.' -Color Green
         return
     }
