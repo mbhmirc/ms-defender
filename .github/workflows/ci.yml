@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  offline-fixture-tests:
+    name: Offline fixture tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run offline fixture tests
+        shell: pwsh -NoProfile -ExecutionPolicy Bypass {0}
+        run: |
+          & "${{ github.workspace }}\defender-offline-fixture-tests.ps1" `
+            -OutputRoot "${{ github.workspace }}\tests\results\ci"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-fixture-results
+          path: tests/results/ci/
+          if-no-files-found: warn
